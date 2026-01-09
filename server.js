@@ -380,7 +380,6 @@
 
 
 
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -390,10 +389,49 @@ const emailService = require('./services/emailService');
 
 const app = express();
 
-console.log({
- 
-  db: process.env.DATABASE_URL
+/* =========================
+   Global Error Handlers
+   (Prevent server crashes)
+========================= */
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+});
+
+/* =========================
+   Test Email Configuration
+========================= */
+async function testEmailConfig() {
+  try {
+    console.log('🔍 Testing email configuration...');
+    console.log('- Host:', process.env.EMAIL_HOST);
+    console.log('- Port:', process.env.EMAIL_PORT);
+    console.log('- User:', process.env.EMAIL_USER);
+    
+    const nodemailer = require('nodemailer');
+    const testTransporter = nodemailer.createTransport({
+      host: process.env.EMAIL_HOST,
+      port: parseInt(process.env.EMAIL_PORT),
+      secure: false,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD
+      },
+      connectionTimeout: 10000
+    });
+    
+    await testTransporter.verify();
+    console.log('✅ Email configuration is valid');
+    return true;
+  } catch (error) {
+    console.error('❌ Email configuration test failed:', error.message);
+    console.log('⚠️ Email functionality will be disabled');
+    return false;
+  }
+}
 
 /* =========================
    Middleware
@@ -410,26 +448,26 @@ app.use(express.json());
 
 /* =========================
    Database Connection
-   (Production-safe)
 ========================= */
 const pool = mysql.createPool({
   uri: process.env.DATABASE_URL,
   waitForConnections: true,
   connectionLimit: 10,
+  queueLimit: 0
 });
-
 
 /* =========================
    Test Database Connection
 ========================= */
-async function testConnection() {
+async function testDBConnection() {
   try {
     const connection = await pool.getConnection();
     console.log('✅ Database connected successfully');
     connection.release();
+    return true;
   } catch (error) {
     console.error('❌ Database connection failed:', error.message);
-    process.exit(1);
+    return false;
   }
 }
 
@@ -439,13 +477,89 @@ async function testConnection() {
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Typeform Backend API',
-    endpoints: {
-      sendVerification: 'POST /api/send-verification',
-      verifyEmail: 'GET /api/verify-email',
-      saveApplication: 'POST /api/save-application',
-      checkStatus: 'GET /api/check-status/:email'
-    }
+    status: 'running',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
   });
+});
+
+/* =========================
+   System Status
+========================= */
+app.get('/api/status', async (req, res) => {
+  try {
+    const dbStatus = await testDBConnection();
+    const emailStatus = await testEmailConfig();
+    
+    res.json({
+      status: 'online',
+      database: dbStatus ? 'connected' : 'disconnected',
+      email: emailStatus ? 'configured' : 'misconfigured',
+      environment: process.env.NODE_ENV || 'development',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/* =========================
+   Email Debug Endpoint
+========================= */
+app.get('/api/debug-email', async (req, res) => {
+  try {
+    const nodemailer = require('nodemailer');
+    
+    const transporter = nodemailer.createTransport({
+      host: process.env.EMAIL_HOST,
+      port: parseInt(process.env.EMAIL_PORT),
+      secure: false,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD
+      },
+      debug: true,
+      logger: true
+    });
+    
+    // Try to verify connection
+    await transporter.verify();
+    
+    // Try to send test email
+    const testEmail = process.env.EMAIL_USER;
+    const info = await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: testEmail,
+      subject: 'Debug Test Email',
+      text: 'This is a debug test email from your server.'
+    });
+    
+    res.json({
+      success: true,
+      message: 'Email test completed',
+      messageId: info.messageId,
+      config: {
+        host: process.env.EMAIL_HOST,
+        port: process.env.EMAIL_PORT,
+        user: process.env.EMAIL_USER,
+        passwordLength: process.env.EMAIL_PASSWORD?.length || 0
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      code: error.code,
+      command: error.command,
+      config: {
+        host: process.env.EMAIL_HOST,
+        port: process.env.EMAIL_PORT,
+        user: process.env.EMAIL_USER,
+        passwordLength: process.env.EMAIL_PASSWORD?.length || 0
+      }
+    });
+  }
 });
 
 /* =========================
@@ -473,20 +587,35 @@ app.post('/api/send-verification', async (req, res) => {
     const verificationLink =
       `${process.env.BACKEND_URL}/api/verify-email?token=${token}&email=${encodeURIComponent(email)}`;
 
-    await emailService.sendVerificationEmail(email, verificationLink);
-
-    console.log(`📧 Verification email sent to ${email}`);
+    let emailSent = false;
+    let emailError = null;
+    
+    try {
+      await emailService.sendVerificationEmail(email, verificationLink);
+      emailSent = true;
+      console.log(`📧 Verification email sent to ${email}`);
+    } catch (error) {
+      emailError = error.message;
+      console.warn(`⚠️ Email sending failed for ${email}:`, error.message);
+      // Continue without crashing
+    }
 
     res.json({
       success: true,
-      message: 'Verification email sent',
+      message: 'Application saved successfully',
       applicationId: result.insertId,
-      token
+      token,
+      emailSent,
+      emailError: emailError,
+      verificationLink: verificationLink // For debugging
     });
 
   } catch (error) {
-    console.error('Error sending verification:', error);
-    res.status(500).json({ error: 'Failed to send verification email' });
+    console.error('Error in send-verification:', error);
+    res.status(500).json({ 
+      error: 'Failed to save application',
+      details: error.message 
+    });
   }
 });
 
@@ -684,7 +813,12 @@ app.post('/api/typeform-webhook', async (req, res) => {
         const verificationLink =
           `${process.env.BACKEND_URL}/api/verify-email?token=${token}&email=${encodeURIComponent(email)}`;
 
-        await emailService.sendVerificationEmail(email, verificationLink);
+        try {
+          await emailService.sendVerificationEmail(email, verificationLink);
+          console.log(`📧 Webhook: Verification email sent to ${email}`);
+        } catch (emailError) {
+          console.warn(`⚠️ Webhook: Email sending failed for ${email}`);
+        }
       }
     }
 
@@ -727,11 +861,89 @@ app.get('/api/webhook-status/:email', async (req, res) => {
 });
 
 /* =========================
+   Test Database Schema
+========================= */
+app.get('/api/test-db', async (req, res) => {
+  try {
+    const [tables] = await pool.execute('SHOW TABLES');
+    const [applications] = await pool.execute('DESCRIBE applications');
+    
+    res.json({
+      success: true,
+      tables: tables.map(t => Object.values(t)[0]),
+      applications_schema: applications
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      sqlMessage: error.sqlMessage
+    });
+  }
+});
+
+/* =========================
+   Application List (Admin)
+========================= */
+app.get('/api/applications', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT id, email, form_type, email_verified, 
+              created_at, verified_at, response_id
+       FROM applications
+       ORDER BY created_at DESC
+       LIMIT 100`
+    );
+    
+    res.json({
+      success: true,
+      count: rows.length,
+      applications: rows
+    });
+  } catch (error) {
+    console.error('Error fetching applications:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+/* =========================
+   Graceful Shutdown Handler
+========================= */
+process.on('SIGTERM', () => {
+  console.log('🛑 SIGTERM received. Closing server gracefully...');
+  pool.end();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 SIGINT received. Closing server gracefully...');
+  pool.end();
+  process.exit(0);
+});
+
+/* =========================
    Start Server
 ========================= */
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, async () => {
-  await testConnection();
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Server starting on port ${PORT}...`);
+  console.log(`📁 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 Backend URL: ${process.env.BACKEND_URL || 'Not set'}`);
+  console.log(`🔗 Frontend URL: ${process.env.FRONTEND_URL || 'Not set'}`);
+  
+  // Test connections
+  await testDBConnection();
+  await testEmailConfig();
+  
+  console.log(`✅ Server is running on port ${PORT}`);
+  console.log(`📋 Available endpoints:`);
+  console.log(`   GET  /                 - Health check`);
+  console.log(`   GET  /api/status       - System status`);
+  console.log(`   GET  /api/debug-email  - Debug email config`);
+  console.log(`   POST /api/send-verification - Send verification email`);
+  console.log(`   GET  /api/verify-email - Verify email`);
+  console.log(`   POST /api/save-application - Save application`);
+  console.log(`   GET  /api/check-status/:email - Check status`);
+  console.log(`   POST /api/typeform-webhook - Typeform webhook`);
 });
