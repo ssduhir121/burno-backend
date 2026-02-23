@@ -7419,8 +7419,8 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 
 const app = express();
 
@@ -7443,9 +7443,8 @@ const requiredEnvVars = [
   'FRONTEND_URL',
   'STRIPE_SECRET_KEY',
   'STRIPE_CONSULTANT_PRICE_ID',
-  'BREVO_SMTP_LOGIN',
-  'BREVO_SMTP_PASSWORD',
-  'EMAIL_FROM'
+  'BREVO_API_KEY',
+  'BREVO_SMTP_LOGIN'
 ];
 
 const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
@@ -7470,8 +7469,7 @@ app.use(cors({
     process.env.FRONTEND_URL,
     'http://localhost:5173',
     'http://localhost:3000',
-    'http://localhost:5000',
-    'http://192.168.1.88:5173'
+    'http://localhost:5000'
   ],
   credentials: true
 }));
@@ -7482,7 +7480,7 @@ app.use(express.urlencoded({ extended: true }));
 /* =========================
    MongoDB Connection
 ========================= */
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://ssudhir405:ss74542@auth.oaiynju.mongodb.net/burno?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
 
 async function connectToMongoDB() {
   try {
@@ -7520,7 +7518,7 @@ mongoose.connection.on('reconnected', () => {
 });
 
 /* =========================
-   MongoDB Schemas (No middleware)
+   MongoDB Schemas
 ========================= */
 
 // User Schema
@@ -7664,96 +7662,114 @@ const MatchSuggestion = mongoose.model('MatchSuggestion', matchSuggestionSchema)
 const EmailLog = mongoose.model('EmailLog', emailLogSchema);
 
 /* =========================
-   Email Service with Brevo SMTP
+   Email Service with Brevo API
 ========================= */
-const transporter = nodemailer.createTransport({
-  host: 'smtp-relay.brevo.com',
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.BREVO_SMTP_LOGIN || 'a326f6001@smtp-brevo.com',
-    pass: process.env.BREVO_SMTP_PASSWORD,
-  },
-  tls: {
-    rejectUnauthorized: false
-  }
-});
 
-// Verify email connection
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('❌ Brevo SMTP connection failed:', error);
-  } else {
-    console.log('✅ Brevo SMTP is ready to send messages');
+// Initialize Brevo API client
+let defaultClient = SibApiV3Sdk.ApiClient.instance;
+let apiKey = defaultClient.authentications['api-key'];
+apiKey.apiKey = process.env.BREVO_API_KEY;
+
+let apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+
+// Test Brevo connection
+async function testBrevoConnection() {
+  try {
+    const accountApi = new SibApiV3Sdk.AccountApi();
+    const account = await accountApi.getAccount();
+    console.log('✅ Brevo API connection successful');
+    console.log(`   Account email: ${account.email}`);
+    return true;
+  } catch (error) {
+    console.error('❌ Brevo API connection failed:', error.message);
+    return false;
   }
-});
+}
 
 const emailService = {
   sendMagicLinkEmail: async (email, magicLink, userType) => {
     try {
       const roleText = userType === 'consultant' ? 'Consultant' : (userType === 'admin' ? 'Admin' : 'Client');
       
-      const mailOptions = {
-        from: `"Web Consultant Hub" <${process.env.EMAIL_FROM || 'pssudhir405@gmail.com'}>`,
-        to: email,
-        subject: `Your Magic Link for Web Consultant Hub`,
-        html: `
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Magic Link Login</title>
-          </head>
-          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
-              <h1 style="color: white; margin: 0; font-size: 28px;">Web Consultant Hub</h1>
-              <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0;">${roleText} Login</p>
+      let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+      
+      sendSmtpEmail.sender = {
+        name: "Web Consultant Hub",
+        email: process.env.BREVO_SMTP_LOGIN
+      };
+      
+      sendSmtpEmail.to = [{ 
+        email: email,
+        name: roleText
+      }];
+      
+      sendSmtpEmail.subject = `Your Magic Link for Web Consultant Hub`;
+      
+      sendSmtpEmail.htmlContent = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Magic Link Login</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+            <h1 style="color: white; margin: 0; font-size: 28px;">Web Consultant Hub</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0;">${roleText} Login</p>
+          </div>
+          
+          <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #ddd; border-top: none;">
+            <h2 style="color: #444; margin-top: 0;">Your Magic Login Link</h2>
+            
+            <p>Hello,</p>
+            
+            <p>You requested a magic link to sign in to your Web Consultant Hub ${roleText} account.</p>
+            
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${magicLink}" style="background: #667eea; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Sign In to Your Account</a>
             </div>
             
-            <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #ddd; border-top: none;">
-              <h2 style="color: #444; margin-top: 0;">Your Magic Login Link</h2>
-              
-              <p>Hello,</p>
-              
-              <p>You requested a magic link to sign in to your Web Consultant Hub ${roleText} account.</p>
-              
-              <div style="text-align: center; margin: 30px 0;">
-                <a href="${magicLink}" style="background: #667eea; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Sign In to Your Account</a>
-              </div>
-              
-              <p style="color: #666; font-size: 14px;">This link will expire in 15 minutes and can only be used once.</p>
-              
-              <p style="color: #666; font-size: 14px;">If you didn't request this, you can safely ignore this email.</p>
-              
-              <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-              
-              <p style="color: #999; font-size: 12px; text-align: center;">
-                &copy; ${new Date().getFullYear()} Web Consultant Hub. All rights reserved.<br>
-                This is an automated message, please do not reply.
-              </p>
-            </div>
-          </body>
-          </html>
-        `,
-        text: `
-          Your Magic Link for Web Consultant Hub (${roleText})
-          
-          Click the link below to sign in:
-          ${magicLink}
-          
-          This link will expire in 15 minutes.
-          
-          If you didn't request this, please ignore this email.
-        `
+            <p style="color: #666; font-size: 14px;">This link will expire in 15 minutes and can only be used once.</p>
+            
+            <p style="color: #666; font-size: 14px;">If you didn't request this, you can safely ignore this email.</p>
+            
+            <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+            
+            <p style="color: #999; font-size: 12px; text-align: center;">
+              &copy; ${new Date().getFullYear()} Web Consultant Hub. All rights reserved.<br>
+              This is an automated message, please do not reply.
+            </p>
+          </div>
+        </body>
+        </html>
+      `;
+      
+      sendSmtpEmail.textContent = `
+        Your Magic Link for Web Consultant Hub (${roleText})
+        
+        Click the link below to sign in:
+        ${magicLink}
+        
+        This link will expire in 15 minutes.
+        
+        If you didn't request this, please ignore this email.
+      `;
+      
+      const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
+      
+      console.log(`📧 Email sent via Brevo API to ${email}:`, data.messageId);
+      
+      return { 
+        success: true, 
+        messageId: data.messageId 
       };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log(`📧 Email sent to ${email} via Brevo:`, info.messageId);
-      return { success: true, messageId: info.messageId };
       
     } catch (error) {
-      console.error('❌ Failed to send email via Brevo:', error);
+      console.error('❌ Failed to send email via Brevo API:', error);
+      if (error.response && error.response.text) {
+        console.error('   Error details:', error.response.text);
+      }
       throw error;
     }
   }
@@ -7820,7 +7836,6 @@ async function initializeDatabase() {
     
   } catch (error) {
     console.error('❌ Database initialization failed:', error.message);
-    console.error('Error details:', error);
   }
 }
 
@@ -7838,8 +7853,7 @@ app.get('/', (req, res) => {
 });
 
 /* =========================
-   1. Check Registration Status First
-   This should be called before showing login/signup form
+   1. Check Registration Status
 ========================= */
 app.post('/api/check-registration', async (req, res) => {
   try {
@@ -7854,11 +7868,9 @@ app.post('/api/check-registration', async (req, res) => {
 
     console.log('🔍 Checking registration for email:', email);
 
-    // Check if user exists in database
     const user = await User.findOne({ email });
 
     if (!user) {
-      // User not registered
       return res.json({
         success: true,
         isRegistered: false,
@@ -7866,7 +7878,6 @@ app.post('/api/check-registration', async (req, res) => {
       });
     }
 
-    // User exists - check profile completion
     let hasProfile = false;
     let profileStatus = 'incomplete';
     
@@ -7898,7 +7909,6 @@ app.post('/api/check-registration', async (req, res) => {
       profileStatus = 'complete';
     }
 
-    // User is registered
     res.json({
       success: true,
       isRegistered: true,
@@ -7920,7 +7930,7 @@ app.post('/api/check-registration', async (req, res) => {
 });
 
 /* =========================
-   2. Send Magic Link (Only for registered users)
+   2. Send Magic Link
 ========================= */
 app.post('/api/send-magic-link', async (req, res) => {
   try {
@@ -7942,7 +7952,6 @@ app.post('/api/send-magic-link', async (req, res) => {
 
     console.log('🔐 Attempting to send magic link for:', email);
 
-    // FIRST CHECK: Verify user exists and is registered
     const existingUser = await User.findOne({ email });
 
     if (!existingUser) {
@@ -7954,7 +7963,6 @@ app.post('/api/send-magic-link', async (req, res) => {
       });
     }
 
-    // Check if user is trying to sign in with correct role
     if (existingUser.role !== userType) {
       console.log('❌ Role mismatch:', { provided: userType, stored: existingUser.role });
       return res.status(400).json({
@@ -7964,14 +7972,11 @@ app.post('/api/send-magic-link', async (req, res) => {
       });
     }
 
-    // User exists and role matches - proceed with magic link
     console.log('✅ Registered user found - sending magic link:', email);
 
-    // Generate magic link token
     const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
-    // Update existing user with magic link token
     await User.updateOne(
       { _id: existingUser._id },
       { 
@@ -7983,10 +7988,8 @@ app.post('/api/send-magic-link', async (req, res) => {
       }
     );
 
-    // Create magic link
     const magicLink = `${process.env.FRONTEND_URL}/auth/verify?token=${token}&email=${encodeURIComponent(email)}&type=${userType}`;
 
-    // Send email
     let emailSent = false;
     let emailError = null;
     
@@ -7999,7 +8002,6 @@ app.post('/api/send-magic-link', async (req, res) => {
       console.warn(`⚠️ Email sending failed for ${email}:`, error.message);
     }
 
-    // Log email attempt
     try {
       await EmailLog.create({
         recipientEmail: email,
@@ -8012,7 +8014,6 @@ app.post('/api/send-magic-link', async (req, res) => {
       console.error('Error logging email:', logError);
     }
 
-    // Check if user has completed profile
     let hasProfile = false;
     let profileStatus = null;
     let profileCompletion = {
@@ -8097,7 +8098,6 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
-    // First check if user exists
     const user = await User.findOne({ email });
 
     if (!user) {
@@ -8109,7 +8109,6 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
-    // Verify the magic link token
     if (user.magicLinkToken !== token) {
       console.log('❌ Invalid token for user:', email);
       return res.status(400).json({
@@ -8118,7 +8117,6 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
-    // Check if token expired
     if (user.magicLinkExpiresAt < new Date()) {
       console.log('❌ Token expired at:', user.magicLinkExpiresAt);
       return res.status(400).json({
@@ -8127,7 +8125,6 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
-    // Verify role matches
     if (user.role !== userType) {
       console.log('❌ Role mismatch:', { provided: userType, stored: user.role });
       return res.status(400).json({
@@ -8138,7 +8135,6 @@ app.post('/api/verify-magic-link', async (req, res) => {
 
     console.log('✅ User verified:', { id: user._id, email: user.email, role: user.role });
 
-    // Mark user as verified if not already
     if (!user.isVerified) {
       await User.updateOne(
         { _id: user._id },
@@ -8152,7 +8148,6 @@ app.post('/api/verify-magic-link', async (req, res) => {
       console.log('✅ User marked as verified');
     }
 
-    // Clear the magic link token
     await User.updateOne(
       { _id: user._id },
       { 
@@ -8163,10 +8158,8 @@ app.post('/api/verify-magic-link', async (req, res) => {
       }
     );
 
-    // Generate session token (in production, use JWT)
     const sessionToken = crypto.randomBytes(32).toString('hex');
 
-    // Get profile info
     let profile = null;
     let hasProfile = false;
     let redirectPath = '/';
@@ -8182,12 +8175,10 @@ app.post('/api/verify-magic-link', async (req, res) => {
       profile = consultantProfile;
       
       if (consultantProfile) {
-        // Check profile completion
         profileCompletion.basicInfo = !!(consultantProfile.fullName && consultantProfile.phone && consultantProfile.baseCountry);
         profileCompletion.availability = consultantProfile.availability && consultantProfile.availability.length > 0;
         profileCompletion.payment = consultantProfile.subscriptionStatus === 'active';
         
-        // Determine redirect based on completion
         if (!profileCompletion.basicInfo) {
           redirectPath = '/consultant/profile-setup?step=basic';
         } else if (!profileCompletion.availability) {
@@ -8206,7 +8197,6 @@ app.post('/api/verify-magic-link', async (req, res) => {
       profile = clientProfile;
       
       if (clientProfile) {
-        // Check profile completion
         profileCompletion.basicInfo = !!(clientProfile.companyName && clientProfile.contactName);
         redirectPath = '/client/dashboard';
       } else {
@@ -8245,7 +8235,7 @@ app.post('/api/verify-magic-link', async (req, res) => {
 });
 
 /* =========================
-   4. Verify Token (for session validation)
+   4. Verify Token
 ========================= */
 app.get('/api/verify-token', async (req, res) => {
   try {
@@ -8290,7 +8280,6 @@ app.post('/api/save-consultant-signup-data', async (req, res) => {
 
     console.log('💾 Saving consultant signup data for:', email);
 
-    // Get user
     const user = await User.findOne({ email, role: 'consultant' });
 
     if (!user) {
@@ -8300,11 +8289,9 @@ app.post('/api/save-consultant-signup-data', async (req, res) => {
       });
     }
 
-    // Check if profile exists
     let consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
 
     if (!consultantProfile) {
-      // Create profile with signup data
       consultantProfile = await ConsultantProfile.create({
         userId: user._id,
         fullName,
@@ -8315,7 +8302,6 @@ app.post('/api/save-consultant-signup-data', async (req, res) => {
         updatedAt: new Date()
       });
     } else {
-      // Update existing profile
       await ConsultantProfile.updateOne(
         { _id: consultantProfile._id },
         {
@@ -8330,7 +8316,6 @@ app.post('/api/save-consultant-signup-data', async (req, res) => {
       );
     }
 
-    // If expertise is provided, save it as a position
     if (expertise) {
       const position = await Position.findOne({ name: expertise });
       
@@ -8375,7 +8360,6 @@ app.get('/api/get-consultant-signup-data', async (req, res) => {
 
     console.log('🔍 Fetching signup data for email:', email);
 
-    // Get user and any existing profile data
     const user = await User.findOne({ email, role: 'consultant' });
 
     if (!user) {
@@ -8388,17 +8372,14 @@ app.get('/api/get-consultant-signup-data', async (req, res) => {
 
     console.log('✅ User found:', { id: user._id, email: user.email });
 
-    // Get profile data
     const consultantProfile = await ConsultantProfile.findOne({ userId: user._id }).populate('positions');
 
-    // Get expertise/positions if any
     let expertise = '';
     if (consultantProfile && consultantProfile.positions && consultantProfile.positions.length > 0) {
       const position = await Position.findById(consultantProfile.positions[0]);
       expertise = position ? position.name : '';
     }
 
-    // Return signup data
     const responseData = {
       success: true,
       data: {
@@ -8440,7 +8421,6 @@ app.post('/api/save-consultant-profile', async (req, res) => {
 
     console.log(`💾 Saving consultant profile (step: ${step}) for:`, email);
 
-    // Get user
     const user = await User.findOne({ email, role: 'consultant', isVerified: true });
 
     if (!user) {
@@ -8451,7 +8431,6 @@ app.post('/api/save-consultant-profile', async (req, res) => {
     }
 
     if (step === 'profile') {
-      // Save basic profile info
       const { 
         full_name, phone, base_country, base_city, 
         work_mode, travel_willingness, travel_radius,
@@ -8477,7 +8456,6 @@ app.post('/api/save-consultant-profile', async (req, res) => {
           updatedAt: new Date()
         });
       } else {
-        // Update fields
         await ConsultantProfile.updateOne(
           { _id: consultantProfile._id },
           {
@@ -8498,7 +8476,6 @@ app.post('/api/save-consultant-profile', async (req, res) => {
         );
       }
 
-      // Save positions if provided
       if (positions && Array.isArray(positions) && positions.length > 0) {
         const positionIds = [];
         for (const positionName of positions) {
@@ -8514,14 +8491,12 @@ app.post('/api/save-consultant-profile', async (req, res) => {
       }
 
     } else if (step === 'availability') {
-      // Save availability
       const { availability_blocks } = formData;
       
       if (availability_blocks && Array.isArray(availability_blocks)) {
         const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
 
         if (consultantProfile) {
-          // Create availability array
           const availability = availability_blocks.map(block => ({
             startDate: new Date(block.start_date),
             endDate: new Date(block.end_date),
@@ -8556,7 +8531,7 @@ app.post('/api/save-consultant-profile', async (req, res) => {
 });
 
 /* =========================
-   8. Create Stripe Subscription for Consultant
+   8. Create Stripe Subscription
 ========================= */
 app.post('/api/create-subscription', async (req, res) => {
   try {
@@ -8571,7 +8546,6 @@ app.post('/api/create-subscription', async (req, res) => {
 
     console.log('💳 Creating subscription for:', email);
 
-    // Get user and profile
     const user = await User.findOne({ email, role: 'consultant', isVerified: true });
     
     if (!user) {
@@ -8602,7 +8576,6 @@ app.post('/api/create-subscription', async (req, res) => {
 
     let customerId = consultantProfile.stripeCustomerId;
     
-    // Create or update Stripe customer
     if (!customerId) {
       const customer = await stripe.customers.create({
         email: user.email,
@@ -8614,7 +8587,6 @@ app.post('/api/create-subscription', async (req, res) => {
       });
       customerId = customer.id;
     } else {
-      // Attach payment method to existing customer
       await stripe.paymentMethods.attach(paymentMethodId, {
         customer: customerId,
       });
@@ -8625,7 +8597,6 @@ app.post('/api/create-subscription', async (req, res) => {
       });
     }
 
-    // Create subscription
     const subscription = await stripe.subscriptions.create({
       customer: customerId,
       items: [{ price: CONSULTANT_PRICE_ID }],
@@ -8633,11 +8604,9 @@ app.post('/api/create-subscription', async (req, res) => {
       expand: ['latest_invoice.payment_intent'],
     });
 
-    // Calculate subscription end date
     const subscriptionEndDate = new Date();
     subscriptionEndDate.setFullYear(subscriptionEndDate.getFullYear() + 1);
 
-    // Update database
     await ConsultantProfile.updateOne(
       { _id: consultantProfile._id },
       {
@@ -8696,7 +8665,6 @@ app.post('/api/save-client-signup-data', async (req, res) => {
 
     console.log('💾 Saving client signup data for:', email);
 
-    // Get user
     const user = await User.findOne({ email, role: 'client' });
 
     if (!user) {
@@ -8706,11 +8674,9 @@ app.post('/api/save-client-signup-data', async (req, res) => {
       });
     }
 
-    // Check if profile exists
     let clientProfile = await ClientProfile.findOne({ userId: user._id });
 
     if (!clientProfile) {
-      // Create profile with signup data
       await ClientProfile.create({
         userId: user._id,
         companyName,
@@ -8724,7 +8690,6 @@ app.post('/api/save-client-signup-data', async (req, res) => {
         updatedAt: new Date()
       });
     } else {
-      // Update existing profile
       await ClientProfile.updateOne(
         { _id: clientProfile._id },
         {
@@ -8775,7 +8740,6 @@ app.get('/api/get-client-signup-data', async (req, res) => {
 
     console.log('🔍 Fetching client signup data for email:', email);
 
-    // Get user and profile data
     const user = await User.findOne({ email, role: 'client' });
 
     if (!user) {
@@ -8788,10 +8752,8 @@ app.get('/api/get-client-signup-data', async (req, res) => {
 
     console.log('✅ Client found:', { id: user._id, email: user.email });
 
-    // Get profile
     const clientProfile = await ClientProfile.findOne({ userId: user._id });
 
-    // Return signup data
     const responseData = {
       success: true,
       data: {
@@ -8839,7 +8801,6 @@ app.post('/api/save-client-profile', async (req, res) => {
 
     console.log('💾 Saving client profile for:', email);
 
-    // Get user
     const user = await User.findOne({ email, role: 'client', isVerified: true });
 
     if (!user) {
@@ -8849,7 +8810,6 @@ app.post('/api/save-client-profile', async (req, res) => {
       });
     }
 
-    // Check if profile exists
     let clientProfile = await ClientProfile.findOne({ userId: user._id });
 
     if (!clientProfile) {
@@ -8933,7 +8893,6 @@ app.post('/api/create-client-request', async (req, res) => {
 
     console.log('📝 Creating client request for:', email);
 
-    // Get client profile
     const user = await User.findOne({ email, role: 'client', isVerified: true });
     
     if (!user) {
@@ -8952,7 +8911,6 @@ app.post('/api/create-client-request', async (req, res) => {
       });
     }
 
-    // Create request
     const clientRequest = await ClientRequest.create({
       clientProfileId: clientProfile._id,
       positionId: position_id,
@@ -8973,7 +8931,6 @@ app.post('/api/create-client-request', async (req, res) => {
 
     console.log('✅ Client request created with ID:', clientRequest._id);
 
-    // Trigger matching algorithm (async)
     setTimeout(async () => {
       try {
         await generateMatchSuggestions(clientRequest._id);
@@ -9003,7 +8960,6 @@ app.post('/api/create-client-request', async (req, res) => {
 ========================= */
 async function generateMatchSuggestions(requestId) {
   try {
-    // Get request details
     const request = await ClientRequest.findById(requestId)
       .populate('positionId')
       .populate({
@@ -9013,7 +8969,6 @@ async function generateMatchSuggestions(requestId) {
 
     if (!request) return;
 
-    // Find matching consultants
     const consultants = await ConsultantProfile.find({
       subscriptionStatus: 'active',
       positions: request.positionId?._id,
@@ -9025,9 +8980,7 @@ async function generateMatchSuggestions(requestId) {
 
     console.log(`Found ${consultants.length} potential consultants for request ${requestId}`);
 
-    // Check availability for each consultant
     for (const consultant of consultants) {
-      // Simple availability check
       let isAvailable = true;
       
       if (request.startDate && request.endDate) {
@@ -9040,17 +8993,14 @@ async function generateMatchSuggestions(requestId) {
       }
 
       if (isAvailable) {
-        // Calculate match score
-        let matchScore = 70; // Base score
+        let matchScore = 70;
         
-        // Work mode match
         if (consultant.workModePreference === request.workMode) {
           matchScore += 15;
         } else if (consultant.workModePreference === 'hybrid') {
           matchScore += 10;
         }
         
-        // Location match bonus (if on-site)
         if (request.workMode === 'on-site' && 
             consultant.baseCountry === request.workCountry) {
           matchScore += 15;
@@ -9059,12 +9009,10 @@ async function generateMatchSuggestions(requestId) {
           }
         }
 
-        // Travel willingness bonus
         if (request.workMode === 'on-site' && consultant.travelWillingness) {
           matchScore += 5;
         }
 
-        // Create match suggestion
         await MatchSuggestion.create({
           requestId: request._id,
           consultantProfileId: consultant._id,
@@ -9126,7 +9074,6 @@ app.get('/api/admin/match-suggestions', async (req, res) => {
       })
       .sort({ matchScore: -1, createdAt: -1 });
     
-    // Format the response
     const formattedSuggestions = suggestions.map(s => {
       const suggestionObj = s.toObject();
       return {
@@ -9168,7 +9115,6 @@ app.put('/api/admin/update-match-status', async (req, res) => {
       });
     }
     
-    // Get admin ID
     const admin = await User.findOne({ role: 'admin' });
     
     if (!admin) {
@@ -9228,7 +9174,6 @@ app.get('/api/admin/requests', async (req, res) => {
       .populate('clientProfileId')
       .sort({ createdAt: -1 });
     
-    // Get match counts for each request
     const requestsWithCounts = await Promise.all(requests.map(async (request) => {
       const matchCount = await MatchSuggestion.countDocuments({ requestId: request._id });
       const requestObj = request.toObject();
@@ -9272,7 +9217,6 @@ app.get('/api/admin/consultants', async (req, res) => {
       .populate('positions')
       .sort({ createdAt: -1 });
     
-    // Get match counts for each consultant
     const consultantsWithCounts = await Promise.all(consultants.map(async (consultant) => {
       const matchCount = await MatchSuggestion.countDocuments({ consultantProfileId: consultant._id });
       const consultantObj = consultant.toObject();
@@ -9308,7 +9252,6 @@ app.get('/api/admin/clients', async (req, res) => {
       .populate('userId')
       .sort({ createdAt: -1 });
     
-    // Get request counts for each client
     const clientsWithCounts = await Promise.all(clients.map(async (client) => {
       const requestCount = await ClientRequest.countDocuments({ clientProfileId: client._id });
       const clientObj = client.toObject();
@@ -9347,7 +9290,6 @@ app.post('/api/admin/verify-consultant', async (req, res) => {
       });
     }
     
-    // Get consultant profile
     const consultantProfile = await ConsultantProfile.findById(consultantId);
     
     if (!consultantProfile) {
@@ -9357,7 +9299,6 @@ app.post('/api/admin/verify-consultant', async (req, res) => {
       });
     }
     
-    // Update user verification
     await User.updateOne(
       { _id: consultantProfile.userId },
       { $set: { isVerified: true } }
@@ -9390,7 +9331,6 @@ app.put('/api/admin/update-request-status', async (req, res) => {
       });
     }
     
-    // Validate status
     const validStatuses = ['submitted', 'under_review', 'contacting', 'shortlist_ready', 'closed'];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ 
@@ -9404,7 +9344,6 @@ app.put('/api/admin/update-request-status', async (req, res) => {
       { $set: { status: status } }
     );
     
-    // If status is 'under_review', trigger match generation if not already done
     if (status === 'under_review') {
       const matchCount = await MatchSuggestion.countDocuments({ requestId: request_id });
       
@@ -9431,10 +9370,8 @@ app.put('/api/admin/update-request-status', async (req, res) => {
 
 app.get('/api/admin/stats', async (req, res) => {
   try {
-    // Get consultant stats
     const consultantTotal = await ConsultantProfile.countDocuments();
     
-    // Get verified consultants count
     const verifiedConsultants = await ConsultantProfile.aggregate([
       {
         $lookup: {
@@ -9458,22 +9395,18 @@ app.get('/api/admin/stats', async (req, res) => {
       subscriptionStatus: 'active'
     });
     
-    // Get client stats
     const clientTotal = await ClientProfile.countDocuments();
     
-    // Get request stats
     const requestTotal = await ClientRequest.countDocuments();
     const pendingRequests = await ClientRequest.countDocuments({
       status: { $in: ['submitted', 'under_review'] }
     });
     
-    // Get match stats
     const matchTotal = await MatchSuggestion.countDocuments();
     const activeMatches = await MatchSuggestion.countDocuments({
       adminReviewStatus: { $in: ['shortlisted', 'contacted'] }
     });
     
-    // Calculate revenue
     const revenue = activeSubscriptions * 99;
     
     res.json({
@@ -9525,7 +9458,6 @@ app.get('/api/admin/consultant/:id', async (req, res) => {
       });
     }
     
-    // Get match count
     const matchCount = await MatchSuggestion.countDocuments({ consultantProfileId: id });
     
     const consultantData = {
@@ -9567,7 +9499,6 @@ app.get('/api/admin/request/:id', async (req, res) => {
       });
     }
     
-    // Get matches for this request
     const matches = await MatchSuggestion.find({ requestId: id })
       .populate({
         path: 'consultantProfileId',
@@ -9618,7 +9549,6 @@ app.get('/api/user/dashboard/:email', async (req, res) => {
   try {
     const { email } = req.params;
     
-    // Get user
     const user = await User.findOne({ email, isVerified: true });
     
     if (!user) {
@@ -9631,7 +9561,6 @@ app.get('/api/user/dashboard/:email', async (req, res) => {
     let data = { user: { email: user.email, role: user.role } };
     
     if (user.role === 'consultant') {
-      // Consultant dashboard data
       const consultantProfile = await ConsultantProfile.findOne({ userId: user._id })
         .populate('positions');
       
@@ -9660,7 +9589,6 @@ app.get('/api/user/dashboard/:email', async (req, res) => {
       data.matchCount = matchesData.length;
       
     } else if (user.role === 'client') {
-      // Client dashboard data
       const clientProfile = await ClientProfile.findOne({ userId: user._id });
       
       const requests = await ClientRequest.find({ clientProfileId: clientProfile?._id })
@@ -9901,6 +9829,7 @@ server = app.listen(PORT, async () => {
   
   if (dbConnected) {
     await initializeDatabase();
+    await testBrevoConnection();
     console.log('\n✅ Server is fully initialized and ready');
   } else {
     console.warn('\n⚠️ Server started but database connection failed');
