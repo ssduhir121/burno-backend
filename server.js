@@ -7695,7 +7695,7 @@ const emailService = {
       
       sendSmtpEmail.sender = {
         name: "Web Consultant Hub",
-        email: process.env.BREVO_SMTP_LOGIN
+        email: process.env.EMAIL_FROM
       };
       
       sendSmtpEmail.to = [{ 
