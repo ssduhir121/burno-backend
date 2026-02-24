@@ -8084,12 +8084,17 @@ app.post('/api/send-magic-link', async (req, res) => {
 /* =========================
    3. Verify Magic Link
 ========================= */
+// Replace your existing verify-magic-link endpoint (around line 500)
 app.post('/api/verify-magic-link', async (req, res) => {
   try {
     const { token, email, userType } = req.body;
 
-    console.log('🔍 Verifying magic link:', { token: token?.substring(0, 10) + '...', email, userType });
+    console.log('🔍 Verifying magic link:');
+    console.log('   - Token:', token ? token.substring(0, 10) + '...' : 'MISSING');
+    console.log('   - Email:', email);
+    console.log('   - UserType:', userType);
 
+    // Validate required fields
     if (!token) {
       console.log('❌ No token provided');
       return res.status(400).json({
@@ -8098,6 +8103,23 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
+    if (!email) {
+      console.log('❌ No email provided');
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required'
+      });
+    }
+
+    if (!userType) {
+      console.log('❌ No userType provided');
+      return res.status(400).json({
+        success: false,
+        error: 'User type is required'
+      });
+    }
+
+    // Find user by email
     const user = await User.findOne({ email });
 
     if (!user) {
@@ -8109,15 +8131,28 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
+    console.log('✅ User found:', { 
+      id: user._id, 
+      email: user.email, 
+      role: user.role,
+      hasToken: !!user.magicLinkToken,
+      tokenExpires: user.magicLinkExpiresAt
+    });
+
+    // Check if token matches
     if (user.magicLinkToken !== token) {
-      console.log('❌ Invalid token for user:', email);
+      console.log('❌ Token mismatch');
+      console.log('   - Stored token:', user.magicLinkToken ? user.magicLinkToken.substring(0, 10) + '...' : 'null');
+      console.log('   - Provided token:', token.substring(0, 10) + '...');
+      
       return res.status(400).json({
         success: false,
         error: 'Invalid or expired token'
       });
     }
 
-    if (user.magicLinkExpiresAt < new Date()) {
+    // Check if token is expired
+    if (!user.magicLinkExpiresAt || user.magicLinkExpiresAt < new Date()) {
       console.log('❌ Token expired at:', user.magicLinkExpiresAt);
       return res.status(400).json({
         success: false,
@@ -8125,6 +8160,7 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
+    // Check if userType matches
     if (user.role !== userType) {
       console.log('❌ Role mismatch:', { provided: userType, stored: user.role });
       return res.status(400).json({
@@ -8133,8 +8169,9 @@ app.post('/api/verify-magic-link', async (req, res) => {
       });
     }
 
-    console.log('✅ User verified:', { id: user._id, email: user.email, role: user.role });
+    console.log('✅ Token verified successfully for user:', user.email);
 
+    // Mark user as verified if not already
     if (!user.isVerified) {
       await User.updateOne(
         { _id: user._id },
@@ -8148,6 +8185,7 @@ app.post('/api/verify-magic-link', async (req, res) => {
       console.log('✅ User marked as verified');
     }
 
+    // Clear the magic link token (one-time use)
     await User.updateOne(
       { _id: user._id },
       { 
@@ -8158,8 +8196,10 @@ app.post('/api/verify-magic-link', async (req, res) => {
       }
     );
 
+    // Generate session token
     const sessionToken = crypto.randomBytes(32).toString('hex');
 
+    // Get profile data and determine redirect path
     let profile = null;
     let hasProfile = false;
     let redirectPath = '/';
@@ -8199,8 +8239,10 @@ app.post('/api/verify-magic-link', async (req, res) => {
       if (clientProfile) {
         profileCompletion.basicInfo = !!(clientProfile.companyName && clientProfile.contactName);
         redirectPath = '/client/dashboard';
+        console.log('✅ Client profile found, redirecting to dashboard');
       } else {
         redirectPath = '/client/profile-setup';
+        console.log('⚠️ No client profile found, redirecting to profile setup');
       }
     } else if (user.role === 'admin') {
       hasProfile = true;
@@ -8208,7 +8250,8 @@ app.post('/api/verify-magic-link', async (req, res) => {
       profileCompletion = { basicInfo: true, availability: true, payment: true };
     }
 
-    res.json({
+    // Return success response
+    const response = {
       success: true,
       user: {
         id: user._id,
@@ -8222,10 +8265,18 @@ app.post('/api/verify-magic-link', async (req, res) => {
       profile,
       redirectTo: redirectPath,
       requiresSignup: false
+    };
+
+    console.log('✅ Sending success response:', {
+      redirectTo: redirectPath,
+      hasProfile,
+      role: user.role
     });
 
+    res.json(response);
+
   } catch (error) {
-    console.error('Error verifying magic link:', error);
+    console.error('❌ Error verifying magic link:', error);
     res.status(500).json({ 
       success: false,
       error: 'Verification failed',
@@ -8233,6 +8284,156 @@ app.post('/api/verify-magic-link', async (req, res) => {
     });
   }
 });
+
+// app.post('/api/verify-magic-link', async (req, res) => {
+//   try {
+//     const { token, email, userType } = req.body;
+
+//     console.log('🔍 Verifying magic link:', { token: token?.substring(0, 10) + '...', email, userType });
+
+//     if (!token) {
+//       console.log('❌ No token provided');
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Token is required'
+//       });
+//     }
+
+//     const user = await User.findOne({ email });
+
+//     if (!user) {
+//       console.log('❌ User not found for email:', email);
+//       return res.status(400).json({
+//         success: false,
+//         error: 'User not found. Please sign up first.',
+//         requiresSignup: true
+//       });
+//     }
+
+//     if (user.magicLinkToken !== token) {
+//       console.log('❌ Invalid token for user:', email);
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Invalid or expired token'
+//       });
+//     }
+
+//     if (user.magicLinkExpiresAt < new Date()) {
+//       console.log('❌ Token expired at:', user.magicLinkExpiresAt);
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Token has expired'
+//       });
+//     }
+
+//     if (user.role !== userType) {
+//       console.log('❌ Role mismatch:', { provided: userType, stored: user.role });
+//       return res.status(400).json({
+//         success: false,
+//         error: `This account is registered as a ${user.role}. Please use the correct login type.`
+//       });
+//     }
+
+//     console.log('✅ User verified:', { id: user._id, email: user.email, role: user.role });
+
+//     if (!user.isVerified) {
+//       await User.updateOne(
+//         { _id: user._id },
+//         { 
+//           $set: { 
+//             isVerified: true,
+//             updatedAt: new Date()
+//           } 
+//         }
+//       );
+//       console.log('✅ User marked as verified');
+//     }
+
+//     await User.updateOne(
+//       { _id: user._id },
+//       { 
+//         $set: { 
+//           magicLinkToken: null,
+//           magicLinkExpiresAt: null
+//         } 
+//       }
+//     );
+
+//     const sessionToken = crypto.randomBytes(32).toString('hex');
+
+//     let profile = null;
+//     let hasProfile = false;
+//     let redirectPath = '/';
+//     let profileCompletion = {
+//       basicInfo: false,
+//       availability: false,
+//       payment: false
+//     };
+
+//     if (user.role === 'consultant') {
+//       const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+//       hasProfile = !!consultantProfile;
+//       profile = consultantProfile;
+      
+//       if (consultantProfile) {
+//         profileCompletion.basicInfo = !!(consultantProfile.fullName && consultantProfile.phone && consultantProfile.baseCountry);
+//         profileCompletion.availability = consultantProfile.availability && consultantProfile.availability.length > 0;
+//         profileCompletion.payment = consultantProfile.subscriptionStatus === 'active';
+        
+//         if (!profileCompletion.basicInfo) {
+//           redirectPath = '/consultant/profile-setup?step=basic';
+//         } else if (!profileCompletion.availability) {
+//           redirectPath = '/consultant/profile-setup?step=availability';
+//         } else if (!profileCompletion.payment) {
+//           redirectPath = '/consultant/subscription';
+//         } else {
+//           redirectPath = '/consultant/dashboard';
+//         }
+//       } else {
+//         redirectPath = '/consultant/profile-setup?step=basic';
+//       }
+//     } else if (user.role === 'client') {
+//       const clientProfile = await ClientProfile.findOne({ userId: user._id });
+//       hasProfile = !!clientProfile;
+//       profile = clientProfile;
+      
+//       if (clientProfile) {
+//         profileCompletion.basicInfo = !!(clientProfile.companyName && clientProfile.contactName);
+//         redirectPath = '/client/dashboard';
+//       } else {
+//         redirectPath = '/client/profile-setup';
+//       }
+//     } else if (user.role === 'admin') {
+//       hasProfile = true;
+//       redirectPath = '/admin/dashboard';
+//       profileCompletion = { basicInfo: true, availability: true, payment: true };
+//     }
+
+//     res.json({
+//       success: true,
+//       user: {
+//         id: user._id,
+//         email: user.email,
+//         role: user.role,
+//         isVerified: true,
+//         hasProfile,
+//         profileCompletion
+//       },
+//       token: sessionToken,
+//       profile,
+//       redirectTo: redirectPath,
+//       requiresSignup: false
+//     });
+
+//   } catch (error) {
+//     console.error('Error verifying magic link:', error);
+//     res.status(500).json({ 
+//       success: false,
+//       error: 'Verification failed',
+//       details: error.message 
+//     });
+//   }
+// });
 
 /* =========================
    4. Verify Token
@@ -8643,6 +8844,7 @@ app.post('/api/create-subscription', async (req, res) => {
 /* =========================
    9. Save Client Signup Data
 ========================= */
+// Replace your existing save-client-signup-data endpoint (around line 1000)
 app.post('/api/save-client-signup-data', async (req, res) => {
   try {
     const { 
@@ -8665,15 +8867,27 @@ app.post('/api/save-client-signup-data', async (req, res) => {
 
     console.log('💾 Saving client signup data for:', email);
 
-    const user = await User.findOne({ email, role: 'client' });
-
+    // Find or create the user
+    let user = await User.findOne({ email });
+    
     if (!user) {
+      console.log('👤 User not found, creating new client user:', email);
+      user = await User.create({
+        email,
+        role: 'client',
+        isVerified: false,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      console.log('✅ New client user created:', user._id);
+    } else if (user.role !== 'client') {
       return res.status(400).json({
         success: false,
-        error: 'Client not found'
+        error: `This email is registered as a ${user.role}. Please use the correct signup type.`
       });
     }
 
+    // Now save/update the client profile
     let clientProfile = await ClientProfile.findOne({ userId: user._id });
 
     if (!clientProfile) {
@@ -8689,6 +8903,7 @@ app.post('/api/save-client-signup-data', async (req, res) => {
         createdAt: new Date(),
         updatedAt: new Date()
       });
+      console.log('✅ New client profile created for:', email);
     } else {
       await ClientProfile.updateOne(
         { _id: clientProfile._id },
@@ -8705,9 +8920,8 @@ app.post('/api/save-client-signup-data', async (req, res) => {
           }
         }
       );
+      console.log('✅ Client profile updated for:', email);
     }
-
-    console.log('✅ Client signup data saved for:', email);
 
     res.json({
       success: true,
