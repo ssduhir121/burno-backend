@@ -56,7 +56,8 @@ const createUploadDirectories = () => {
     './public',
     './public/uploads',
     './public/uploads/cv',
-    './public/uploads/temp'
+    './public/uploads/temp',
+    './public/uploads/support'
   ];
   
   dirs.forEach(dir => {
@@ -277,7 +278,40 @@ const emailLogSchema = new mongoose.Schema({
   initiatedByAdminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
 });
 
+
+// Support Request Schema
+const supportRequestSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true },
+  role: { type: String, enum: ['consultant', 'client', 'both', 'other'], default: 'consultant' },
+  subject: { type: String, required: true },
+  message: { type: String, required: true },
+  priority: { type: String, enum: ['low', 'normal', 'high', 'critical'], default: 'normal' },
+  status: { type: String, enum: ['new', 'in_progress', 'resolved', 'closed'], default: 'new' },
+  ticketId: { type: String, unique: true },
+  assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  attachments: [{ type: String }], // URLs to attached files
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+  resolvedAt: { type: Date, default: null }
+});
+
+// Support Reply Schema (for threaded conversations)
+const supportReplySchema = new mongoose.Schema({
+  supportRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'SupportRequest', required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  userRole: { type: String, enum: ['consultant', 'client', 'admin'], required: true },
+  message: { type: String, required: true },
+  attachments: [{ type: String }],
+  isInternal: { type: Boolean, default: false }, // For admin-only notes
+  createdAt: { type: Date, default: Date.now }
+});
+
+
 // Create Models
+const SupportRequest = mongoose.model('SupportRequest', supportRequestSchema);
+const SupportReply = mongoose.model('SupportReply', supportReplySchema);
 const User = mongoose.model('User', userSchema);
 const Position = mongoose.model('Position', positionSchema);
 const ConsultantProfile = mongoose.model('ConsultantProfile', consultantProfileSchema);
@@ -398,6 +432,212 @@ const emailService = {
     }
   }
 };
+
+
+async function sendSupportConfirmationEmail(email, name, ticketId, subject) {
+  try {
+    let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    
+    sendSmtpEmail.sender = {
+      name: "Web Consultant Hub Support",
+      email: process.env.EMAIL_FROM || 'support@webconsultanthub.com'
+    };
+    
+    sendSmtpEmail.to = [{ 
+      email: email,
+      name: name
+    }];
+    
+    sendSmtpEmail.subject = `Support Request Received - Ticket #${ticketId}`;
+    
+    sendSmtpEmail.htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Support Request Confirmation</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+          <h1 style="color: white; margin: 0; font-size: 28px;">Web Consultant Hub</h1>
+          <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0;">Support Request Received</p>
+        </div>
+        
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #ddd; border-top: none;">
+          <h2 style="color: #444; margin-top: 0;">Hello ${name},</h2>
+          
+          <p>Thank you for contacting Web Consultant Hub support. We have received your request and our team will get back to you as soon as possible.</p>
+          
+          <div style="background: #e8f4fd; padding: 20px; border-radius: 5px; margin: 20px 0;">
+            <p style="margin: 0 0 10px 0;"><strong>Ticket ID:</strong> ${ticketId}</p>
+            <p style="margin: 0 0 10px 0;"><strong>Subject:</strong> ${subject}</p>
+            <p style="margin: 0;"><strong>Status:</strong> New</p>
+          </div>
+          
+          <p>Our support team typically responds within 24 hours during business days. You can expect a response via email shortly.</p>
+          
+          <p style="color: #666; font-size: 14px;">If you have any additional information to add to your request, please reply to this email.</p>
+          
+          <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+          
+          <p style="color: #999; font-size: 12px; text-align: center;">
+            &copy; ${new Date().getFullYear()} Web Consultant Hub. All rights reserved.<br>
+            This is an automated message, please do not reply directly to this email.
+          </p>
+        </div>
+      </html>
+    `;
+    
+    sendSmtpEmail.textContent = `
+      Support Request Received - Ticket #${ticketId}
+      
+      Hello ${name},
+      
+      Thank you for contacting Web Consultant Hub support. We have received your request and our team will get back to you as soon as possible.
+      
+      Ticket ID: ${ticketId}
+      Subject: ${subject}
+      Status: New
+      
+      Our support team typically responds within 24 hours during business days.
+      
+      If you have any additional information to add to your request, please reply to this email.
+    `;
+    
+    const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    return { success: true, messageId: data.messageId };
+    
+  } catch (error) {
+    console.error('❌ Failed to send support confirmation email:', error);
+    throw error;
+  }
+}
+
+
+async function notifyAdminsOfNewSupportRequest(supportRequest) {
+  try {
+    // Find all admin users
+    const admins = await User.find({ role: 'admin' });
+    
+    if (admins.length === 0) {
+      console.log('⚠️ No admin users found for notification');
+      return;
+    }
+    
+    const priorityColors = {
+      low: '#3b82f6', // blue
+      normal: '#10b981', // green
+      high: '#f59e0b', // orange
+      critical: '#ef4444' // red
+    };
+    
+    const priorityLabels = {
+      low: 'Low',
+      normal: 'Normal',
+      high: 'High',
+      critical: 'Critical'
+    };
+    
+    for (const admin of admins) {
+      try {
+        let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+        
+        sendSmtpEmail.sender = {
+          name: "Web Consultant Hub Support",
+          email: process.env.EMAIL_FROM || 'support@webconsultanthub.com'
+        };
+        
+        sendSmtpEmail.to = [{ 
+          email: admin.email,
+          name: 'Admin'
+        }];
+        
+        sendSmtpEmail.subject = `[${priorityLabels[supportRequest.priority]}] New Support Request - ${supportRequest.ticketId}`;
+        
+        sendSmtpEmail.htmlContent = `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>New Support Request</title>
+          </head>
+          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background: ${priorityColors[supportRequest.priority] || '#667eea'}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+              <h1 style="color: white; margin: 0; font-size: 28px;">New Support Request</h1>
+              <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0;">Priority: ${priorityLabels[supportRequest.priority] || 'Normal'}</p>
+            </div>
+            
+            <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #ddd; border-top: none;">
+              <h2 style="color: #444; margin-top: 0;">Ticket #${supportRequest.ticketId}</h2>
+              
+              <table style="width: 100%; border-collapse: collapse;">
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold; width: 120px;">From:</td>
+                  <td style="padding: 10px 0;">${supportRequest.name} (${supportRequest.email})</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold;">Role:</td>
+                  <td style="padding: 10px 0;">${supportRequest.role}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold;">Subject:</td>
+                  <td style="padding: 10px 0;">${supportRequest.subject}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold;">Priority:</td>
+                  <td style="padding: 10px 0;">
+                    <span style="background: ${priorityColors[supportRequest.priority] || '#10b981'}; color: white; padding: 3px 10px; border-radius: 3px; font-size: 12px;">
+                      ${priorityLabels[supportRequest.priority] || 'Normal'}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 10px 0; font-weight: bold;">User ID:</td>
+                  <td style="padding: 10px 0;">${supportRequest.userId || 'Not registered'}</td>
+                </tr>
+              </table>
+              
+              <div style="margin: 20px 0; padding: 15px; background: white; border-left: 4px solid #667eea; border-radius: 0 5px 5px 0;">
+                <p style="margin: 0; white-space: pre-wrap;">${supportRequest.message}</p>
+              </div>
+              
+              ${supportRequest.attachments && supportRequest.attachments.length > 0 ? `
+                <div style="margin: 20px 0;">
+                  <p style="font-weight: bold; margin-bottom: 10px;">Attachments:</p>
+                  <ul style="margin: 0; padding-left: 20px;">
+                    ${supportRequest.attachments.map(att => `<li><a href="${process.env.FRONTEND_URL}${att}">${att.split('/').pop()}</a></li>`).join('')}
+                  </ul>
+                </div>
+              ` : ''}
+              
+              <div style="text-align: center; margin-top: 30px;">
+                <a href="${process.env.FRONTEND_URL}/admin/support/${supportRequest._id}" style="background: #667eea; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">View in Admin Panel</a>
+              </div>
+              
+              <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+              
+              <p style="color: #999; font-size: 12px; text-align: center;">
+                Received: ${new Date(supportRequest.createdAt).toLocaleString()}
+              </p>
+            </div>
+          </body>
+          </html>
+        `;
+        
+        await apiInstance.sendTransacEmail(sendSmtpEmail);
+        console.log(`📧 Admin notification sent to ${admin.email}`);
+      } catch (adminEmailError) {
+        console.error(`❌ Failed to send notification to admin ${admin.email}:`, adminEmailError);
+      }
+    }
+    
+  } catch (error) {
+    console.error('❌ Error notifying admins:', error);
+    throw error;
+  }
+}
 
 /* =========================
    Helper Functions
@@ -540,7 +780,9 @@ app.post('/api/check-registration', async (req, res) => {
           profileStatus = 'partial';
         }
       }
-    } else if (user.role === 'client') {
+    } 
+    
+    else if (user.role === 'client') {
       const clientProfile = await ClientProfile.findOne({ userId: user._id });
       hasProfile = !!clientProfile;
       
@@ -853,26 +1095,61 @@ app.post('/api/verify-magic-link', async (req, res) => {
     };
 
     if (user.role === 'consultant') {
-      const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+      const consultantProfile = await ConsultantProfile.findOne({ userId: user._id })
+        .populate('positions');
+      
       hasProfile = !!consultantProfile;
       profile = consultantProfile;
       
       if (consultantProfile) {
-        profileCompletion.basicInfo = !!(consultantProfile.fullName && consultantProfile.phone && consultantProfile.baseCountry);
-        profileCompletion.availability = consultantProfile.availability && consultantProfile.availability.length > 0;
+        // SIMPLIFIED CHECKS:
+        // basicInfo: just check if fullName exists (phone and baseCountry are optional)
+        profileCompletion.basicInfo = !!(consultantProfile.fullName);
+        
+        // availability: check if array exists and has items
+        profileCompletion.availability = consultantProfile.availability && 
+                                         consultantProfile.availability.length > 0;
+        
+        // payment: check subscription status
         profileCompletion.payment = consultantProfile.subscriptionStatus === 'active';
         
-        if (!profileCompletion.basicInfo) {
-          redirectPath = '/consultant/profile-setup?step=basic';
-        } else if (!profileCompletion.availability) {
-          redirectPath = '/consultant/profile-setup?step=availability';
-        } else if (!profileCompletion.payment) {
-          redirectPath = '/consultant/subscription';
-        } else {
+        console.log('📊 Consultant Profile Data:');
+        console.log('   - fullName:', consultantProfile.fullName);
+        console.log('   - phone:', consultantProfile.phone);
+        console.log('   - baseCountry:', consultantProfile.baseCountry);
+        console.log('   - availability count:', consultantProfile.availability?.length || 0);
+        console.log('   - subscriptionStatus:', consultantProfile.subscriptionStatus);
+        console.log('   - subscriptionEndDate:', consultantProfile.subscriptionEndDate);
+        
+        console.log('📊 Profile Completion:');
+        console.log('   - basicInfo:', profileCompletion.basicInfo);
+        console.log('   - availability:', profileCompletion.availability);
+        console.log('   - payment:', profileCompletion.payment);
+        
+        // CORRECT REDIRECT LOGIC:
+        // First check subscription (most important)
+        if (consultantProfile.subscriptionStatus === 'active') {
           redirectPath = '/consultant/dashboard';
+          console.log('➡️ REDIRECT: Subscription ACTIVE - going to DASHBOARD');
+        } 
+        // Then check availability
+        else if (!profileCompletion.availability) {
+          redirectPath = '/consultant/profile-setup?step=availability';
+          console.log('➡️ REDIRECT: Availability needed');
+        } 
+        // Then check basic info
+        else if (!profileCompletion.basicInfo) {
+          redirectPath = '/consultant/profile-setup?step=basic';
+          console.log('➡️ REDIRECT: Basic info needed');
+        } 
+        // Finally, if all else fails, go to subscription
+        else {
+          redirectPath = '/consultant/subscription';
+          console.log('➡️ REDIRECT: Subscription needed');
         }
       } else {
         redirectPath = '/consultant/profile-setup?step=basic';
+        console.log('➡️ REDIRECT: No profile found');
       }
     } else if (user.role === 'client') {
       const clientProfile = await ClientProfile.findOne({ userId: user._id });
@@ -891,6 +1168,7 @@ app.post('/api/verify-magic-link', async (req, res) => {
       hasProfile = true;
       redirectPath = '/admin/dashboard';
       profileCompletion = { basicInfo: true, availability: true, payment: true };
+      console.log('✅ Admin user, redirecting to admin dashboard');
     }
 
     // Return success response
@@ -913,7 +1191,10 @@ app.post('/api/verify-magic-link', async (req, res) => {
     console.log('✅ Sending success response:', {
       redirectTo: redirectPath,
       hasProfile,
-      role: user.role
+      role: user.role,
+      payment: profileCompletion.payment,
+      basicInfo: profileCompletion.basicInfo,
+      availability: profileCompletion.availability
     });
 
     res.json(response);
@@ -1601,6 +1882,132 @@ app.post('/api/save-consultant-signup-data', async (req, res) => {
 /* =========================
    9. Save Consultant Profile
 ========================= */
+// app.post('/api/save-consultant-profile', async (req, res) => {
+//   try {
+//     const { email, step, formData } = req.body;
+
+//     if (!email || !step) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Email and step are required'
+//       });
+//     }
+
+//     console.log(`💾 Saving consultant profile (step: ${step}) for:`, email);
+
+//     const user = await User.findOne({ email, role: 'consultant', isVerified: true });
+
+//     if (!user) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Consultant not found or not verified'
+//       });
+//     }
+
+//     if (step === 'profile') {
+//       const { 
+//         full_name, phone, base_country, dob, base_city, 
+//         work_mode, travel_willingness, travel_radius,
+//         years_experience, linkedin, github, positions
+//       } = formData;
+      
+//       let consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+
+//       if (!consultantProfile) {
+//         consultantProfile = await ConsultantProfile.create({
+//           userId: user._id,
+//           fullName: full_name,
+//           phone: phone,
+//           dob: dob ? new Date(dob) : null,
+//           baseCountry: base_country,
+//           baseCity: base_city,
+//           workModePreference: work_mode,
+//           travelWillingness: travel_willingness || false,
+//           travelRadiusKm: travel_radius || null,
+//           yearsExperience: years_experience,
+//           linkedinUrl: linkedin || null,
+//           githubUrl: github || null,
+//           createdAt: new Date(),
+//           updatedAt: new Date()
+//         });
+//       } else {
+//         await ConsultantProfile.updateOne(
+//           { _id: consultantProfile._id },
+//           {
+//             $set: {
+//               fullName: full_name,
+//               phone: phone,
+//               baseCountry: base_country,
+//               baseCity: base_city,
+//               workModePreference: work_mode,
+//               travelWillingness: travel_willingness || false,
+//               travelRadiusKm: travel_radius || null,
+//               yearsExperience: years_experience,
+//               linkedinUrl: linkedin || null,
+//               githubUrl: github || null,
+//               updatedAt: new Date()
+//             }
+//           }
+//         );
+//       }
+
+//       if (positions && Array.isArray(positions) && positions.length > 0) {
+//         const positionIds = [];
+//         for (const positionName of positions) {
+//           const position = await Position.findOne({ name: positionName });
+//           if (position) {
+//             positionIds.push(position._id);
+//           }
+//         }
+//         await ConsultantProfile.updateOne(
+//           { userId: user._id },
+//           { $set: { positions: positionIds } }
+//         );
+//       }
+
+//     } else if (step === 'availability') {
+//       const { availability_blocks } = formData;
+      
+//       if (availability_blocks && Array.isArray(availability_blocks)) {
+//         const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+
+//         if (consultantProfile) {
+//           const availability = availability_blocks.map(block => ({
+//             startDate: new Date(block.start_date),
+//             endDate: new Date(block.end_date),
+//             startTime: block.start_time,
+//             endTime: block.end_time,
+//             timezone: block.timezone || 'UTC'
+//           }));
+          
+//           await ConsultantProfile.updateOne(
+//             { _id: consultantProfile._id },
+//             { $set: { availability: availability } }
+//           );
+//         }
+//       }
+//     }
+
+//     console.log(`✅ Profile ${step} saved successfully for:`, email);
+
+//     res.json({
+//       success: true,
+//       message: `Profile ${step} saved successfully`
+//     });
+
+//   } catch (error) {
+//     console.error('Error saving consultant profile:', error);
+//     res.status(500).json({ 
+//       success: false,
+//       error: 'Failed to save profile',
+//       details: error.message 
+//     });
+//   }
+// });
+
+
+
+// Update the availability section in your /api/save-consultant-profile endpoint
 app.post('/api/save-consultant-profile', async (req, res) => {
   try {
     const { email, step, formData } = req.body;
@@ -1624,90 +2031,55 @@ app.post('/api/save-consultant-profile', async (req, res) => {
     }
 
     if (step === 'profile') {
-      const { 
-        full_name, phone, base_country, dob, base_city, 
-        work_mode, travel_willingness, travel_radius,
-        years_experience, linkedin, github, positions
-      } = formData;
+      // Your existing profile saving code...
       
-      let consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
-
-      if (!consultantProfile) {
-        consultantProfile = await ConsultantProfile.create({
-          userId: user._id,
-          fullName: full_name,
-          phone: phone,
-          dob: dob ? new Date(dob) : null,
-          baseCountry: base_country,
-          baseCity: base_city,
-          workModePreference: work_mode,
-          travelWillingness: travel_willingness || false,
-          travelRadiusKm: travel_radius || null,
-          yearsExperience: years_experience,
-          linkedinUrl: linkedin || null,
-          githubUrl: github || null,
-          createdAt: new Date(),
-          updatedAt: new Date()
-        });
-      } else {
-        await ConsultantProfile.updateOne(
-          { _id: consultantProfile._id },
-          {
-            $set: {
-              fullName: full_name,
-              phone: phone,
-              baseCountry: base_country,
-              baseCity: base_city,
-              workModePreference: work_mode,
-              travelWillingness: travel_willingness || false,
-              travelRadiusKm: travel_radius || null,
-              yearsExperience: years_experience,
-              linkedinUrl: linkedin || null,
-              githubUrl: github || null,
-              updatedAt: new Date()
-            }
-          }
-        );
-      }
-
-      if (positions && Array.isArray(positions) && positions.length > 0) {
-        const positionIds = [];
-        for (const positionName of positions) {
-          const position = await Position.findOne({ name: positionName });
-          if (position) {
-            positionIds.push(position._id);
-          }
-        }
-        await ConsultantProfile.updateOne(
-          { userId: user._id },
-          { $set: { positions: positionIds } }
-        );
-      }
-
     } else if (step === 'availability') {
       const { availability_blocks } = formData;
       
-      if (availability_blocks && Array.isArray(availability_blocks)) {
-        const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
-
-        if (consultantProfile) {
-          const availability = availability_blocks.map(block => ({
-            startDate: new Date(block.start_date),
-            endDate: new Date(block.end_date),
-            startTime: block.start_time,
-            endTime: block.end_time,
-            timezone: block.timezone || 'UTC'
-          }));
-          
-          await ConsultantProfile.updateOne(
-            { _id: consultantProfile._id },
-            { $set: { availability: availability } }
-          );
-        }
+      console.log('📅 Processing availability blocks:', availability_blocks);
+      
+      if (!availability_blocks || !Array.isArray(availability_blocks)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Availability blocks must be an array'
+        });
       }
-    }
 
-    console.log(`✅ Profile ${step} saved successfully for:`, email);
+      const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+
+      if (!consultantProfile) {
+        return res.status(404).json({
+          success: false,
+          error: 'Consultant profile not found'
+        });
+      }
+
+      // Transform the availability blocks to match the schema
+      const availability = availability_blocks.map(block => ({
+        startDate: block.start_date ? new Date(block.start_date) : null,
+        endDate: block.end_date ? new Date(block.end_date) : null,
+        startTime: block.start_time || '',
+        endTime: block.end_time || '',
+        timezone: block.timezone || 'UTC',
+        isRecurring: false,
+        recurrencePattern: ''
+      }));
+
+      console.log('🔄 Updating availability with:', availability);
+
+      // Update the consultant profile with availability
+      await ConsultantProfile.updateOne(
+        { _id: consultantProfile._id },
+        { 
+          $set: { 
+            availability: availability,
+            updatedAt: new Date()
+          } 
+        }
+      );
+
+      console.log('✅ Availability saved successfully for consultant:', user.email);
+    }
 
     res.json({
       success: true,
@@ -1715,7 +2087,7 @@ app.post('/api/save-consultant-profile', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error saving consultant profile:', error);
+    console.error('❌ Error saving consultant profile:', error);
     res.status(500).json({ 
       success: false,
       error: 'Failed to save profile',
@@ -1723,10 +2095,74 @@ app.post('/api/save-consultant-profile', async (req, res) => {
     });
   }
 });
-
 /* =========================
    10. Create Stripe Subscription
 ========================= */
+// app.post('/api/create-subscription', async (req, res) => {
+//   try {
+//     const { email, paymentMethodId } = req.body;
+
+//     if (!email) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Email is required'
+//       });
+//     }
+
+//     console.log('💳 Creating subscription for:', email);
+
+//     const user = await User.findOne({ email, role: 'consultant', isVerified: true });
+    
+//     if (!user) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Consultant not found or not verified'
+//       });
+//     }
+
+//     let consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+
+//     if (!consultantProfile) {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Consultant profile not found'
+//       });
+//     }
+
+//     // For mock payment, just update the subscription status directly
+//     const subscriptionEndDate = new Date();
+//     subscriptionEndDate.setFullYear(subscriptionEndDate.getFullYear() + 1);
+
+//     await ConsultantProfile.updateOne(
+//       { _id: consultantProfile._id },
+//       {
+//         $set: {
+//           subscriptionStatus: 'active',
+//           subscriptionEndDate: subscriptionEndDate,
+//           updatedAt: new Date()
+//         }
+//       }
+//     );
+
+//     console.log('✅ Mock subscription activated for:', email);
+
+//     res.json({
+//       success: true,
+//       message: 'Subscription activated successfully (mock)',
+//       subscriptionStatus: 'active',
+//       subscriptionEndDate: subscriptionEndDate.toISOString().split('T')[0]
+//     });
+
+//   } catch (error) {
+//     console.error('Error creating subscription:', error);
+//     res.status(500).json({ 
+//       success: false,
+//       error: 'Failed to create subscription',
+//       details: error.message 
+//     });
+//   }
+// });
+
 app.post('/api/create-subscription', async (req, res) => {
   try {
     const { email, paymentMethodId } = req.body;
@@ -1758,10 +2194,11 @@ app.post('/api/create-subscription', async (req, res) => {
       });
     }
 
-    // For mock payment, just update the subscription status directly
+    // Calculate subscription end date (1 year from now)
     const subscriptionEndDate = new Date();
     subscriptionEndDate.setFullYear(subscriptionEndDate.getFullYear() + 1);
 
+    // Update the consultant profile with subscription status
     await ConsultantProfile.updateOne(
       { _id: consultantProfile._id },
       {
@@ -1773,17 +2210,19 @@ app.post('/api/create-subscription', async (req, res) => {
       }
     );
 
-    console.log('✅ Mock subscription activated for:', email);
+    console.log('✅ Subscription activated for:', email);
+    console.log('   - Status: active');
+    console.log('   - End Date:', subscriptionEndDate.toISOString().split('T')[0]);
 
     res.json({
       success: true,
-      message: 'Subscription activated successfully (mock)',
+      message: 'Subscription activated successfully',
       subscriptionStatus: 'active',
       subscriptionEndDate: subscriptionEndDate.toISOString().split('T')[0]
     });
 
   } catch (error) {
-    console.error('Error creating subscription:', error);
+    console.error('❌ Error creating subscription:', error);
     res.status(500).json({ 
       success: false,
       error: 'Failed to create subscription',
@@ -1791,7 +2230,6 @@ app.post('/api/create-subscription', async (req, res) => {
     });
   }
 });
-
 /* =========================
    11. Save Client Signup Data
 ========================= */
@@ -2974,6 +3412,669 @@ app.post('/api/stripe-webhook', express.raw({type: 'application/json'}), async (
   }
 });
 
+
+/* =========================
+   21. Submit Support Request
+========================= */
+app.post('/api/support/submit', async (req, res) => {
+  try {
+    const { name, email, role, subject, message, priority } = req.body;
+
+    // Validate required fields
+    const missingFields = [];
+    if (!name || name.trim() === '') missingFields.push('name');
+    if (!email || email.trim() === '') missingFields.push('email');
+    if (!subject || subject.trim() === '') missingFields.push('subject');
+    if (!message || message.trim() === '') missingFields.push('message');
+    
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Missing required fields: ${missingFields.join(', ')}`
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid email format'
+      });
+    }
+
+    console.log('📞 New support request received from:', email);
+
+    // Generate unique ticket ID
+    const ticketId = `SUP-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 1000)}`;
+    
+    // Find user if exists
+    let user = null;
+    try {
+      user = await User.findOne({ email });
+    } catch (userError) {
+      console.warn('⚠️ Error finding user:', userError.message);
+    }
+
+    // Handle file attachments if any
+    const attachments = [];
+    if (req.files && req.files.attachments) {
+      const files = Array.isArray(req.files.attachments) 
+        ? req.files.attachments 
+        : [req.files.attachments];
+      
+      for (const file of files) {
+        try {
+          // Validate file type
+          const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
+          if (!allowedTypes.includes(file.mimetype)) {
+            continue; // Skip invalid file types
+          }
+          
+          // Validate file size (max 5MB)
+          if (file.size > 5 * 1024 * 1024) {
+            continue; // Skip files over 5MB
+          }
+          
+          // Generate unique filename
+          const timestamp = Date.now();
+          const randomString = crypto.randomBytes(8).toString('hex');
+          const ext = path.extname(file.name);
+          const sanitizedName = file.name
+            .replace(ext, '')
+            .replace(/[^a-zA-Z0-9]/g, '-')
+            .toLowerCase()
+            .substring(0, 30);
+          
+          const filename = `support_${timestamp}_${randomString}_${sanitizedName}${ext}`;
+          const uploadPath = path.join(__dirname, 'public/uploads/support', filename);
+          
+          // Ensure directory exists
+          const uploadDir = path.join(__dirname, 'public/uploads/support');
+          if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+          }
+          
+          await file.mv(uploadPath);
+          attachments.push(`/uploads/support/${filename}`);
+          console.log('📎 Attachment saved:', filename);
+        } catch (fileError) {
+          console.error('❌ Error saving attachment:', fileError);
+        }
+      }
+    }
+
+    // Create support request
+    const supportRequest = await SupportRequest.create({
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      role: role || 'other',
+      subject: subject.trim(),
+      message: message.trim(),
+      priority: priority || 'normal',
+      status: 'new',
+      ticketId,
+      userId: user ? user._id : null,
+      attachments,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+
+    console.log('✅ Support request created with ticket ID:', ticketId);
+
+    // Send confirmation email to user
+    let emailSent = false;
+    try {
+      await sendSupportConfirmationEmail(email, name, ticketId, subject);
+      emailSent = true;
+      console.log(`📧 Confirmation email sent to ${email}`);
+    } catch (emailError) {
+      console.error('❌ Failed to send confirmation email:', emailError);
+    }
+
+    // Send notification to admins
+    try {
+      await notifyAdminsOfNewSupportRequest(supportRequest);
+    } catch (notifyError) {
+      console.error('❌ Failed to notify admins:', notifyError);
+    }
+
+    // Return success response
+    res.status(201).json({
+      success: true,
+      message: 'Support request submitted successfully',
+      ticketId: supportRequest.ticketId,
+      emailSent,
+      data: {
+        ticketId: supportRequest.ticketId,
+        name: supportRequest.name,
+        email: supportRequest.email,
+        subject: supportRequest.subject,
+        status: supportRequest.status,
+        createdAt: supportRequest.createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error submitting support request:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to submit support request',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   22. Admin Support Endpoints
+========================= */
+
+// Get all support requests (with filters)
+app.get('/api/admin/support-requests', async (req, res) => {
+  try {
+    const { status, priority, role, page = 1, limit = 20, search } = req.query;
+    
+    const query = {};
+    
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    if (role) query.role = role;
+    
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { subject: { $regex: search, $options: 'i' } },
+        { ticketId: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const total = await SupportRequest.countDocuments(query);
+    const requests = await SupportRequest.find(query)
+      .sort({ priority: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .populate('userId', 'email role isVerified');
+    
+    // Get reply counts for each request
+    const requestsWithData = await Promise.all(requests.map(async (request) => {
+      const replyCount = await SupportReply.countDocuments({ supportRequestId: request._id });
+      return {
+        ...request.toObject(),
+        replyCount
+      };
+    }));
+    
+    res.json({
+      success: true,
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit),
+      totalPages: Math.ceil(total / parseInt(limit)),
+      requests: requestsWithData
+    });
+    
+  } catch (error) {
+    console.error('Error fetching support requests:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Get single support request with replies
+app.get('/api/admin/support-requests/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const request = await SupportRequest.findById(id)
+      .populate('userId', 'email role isVerified')
+      .populate('assignedTo', 'email');
+    
+    if (!request) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Support request not found' 
+      });
+    }
+    
+    const replies = await SupportReply.find({ supportRequestId: id })
+      .populate('userId', 'email role')
+      .sort({ createdAt: 1 });
+    
+    res.json({
+      success: true,
+      request,
+      replies,
+      replyCount: replies.length
+    });
+    
+  } catch (error) {
+    console.error('Error fetching support request:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Add reply to support request
+app.post('/api/admin/support-requests/:id/reply', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message, isInternal = false } = req.body;
+    const adminId = req.body.adminId; // You'd get this from auth middleware
+    
+    if (!message || message.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Message is required'
+      });
+    }
+    
+    const request = await SupportRequest.findById(id);
+    if (!request) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Support request not found' 
+      });
+    }
+    
+    // Find admin user
+    const admin = await User.findOne({ role: 'admin' });
+    if (!admin) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Admin not found' 
+      });
+    }
+    
+    // Create reply
+    const reply = await SupportReply.create({
+      supportRequestId: id,
+      userId: admin._id,
+      userRole: 'admin',
+      message: message.trim(),
+      isInternal: isInternal === true,
+      createdAt: new Date()
+    });
+    
+    // Update request status
+    await SupportRequest.updateOne(
+      { _id: id },
+      { 
+        $set: { 
+          status: 'in_progress',
+          updatedAt: new Date()
+        } 
+      }
+    );
+    
+    // If not internal, send email notification to user
+    if (!isInternal) {
+      try {
+        await sendSupportReplyEmail(request.email, request.name, request.ticketId, message);
+      } catch (emailError) {
+        console.error('Failed to send reply email:', emailError);
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Reply added successfully',
+      reply
+    });
+    
+  } catch (error) {
+    console.error('Error adding reply:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Update support request status
+app.put('/api/admin/support-requests/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    
+    const validStatuses = ['new', 'in_progress', 'resolved', 'closed'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid status value'
+      });
+    }
+    
+    const updateData = {
+      status,
+      updatedAt: new Date()
+    };
+    
+    if (status === 'resolved') {
+      updateData.resolvedAt = new Date();
+    }
+    
+    await SupportRequest.updateOne(
+      { _id: id },
+      { $set: updateData }
+    );
+    
+    res.json({
+      success: true,
+      message: 'Status updated successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error updating status:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Assign support request to admin
+app.put('/api/admin/support-requests/:id/assign', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminId } = req.body;
+    
+    const admin = await User.findById(adminId);
+    if (!admin || admin.role !== 'admin') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid admin ID'
+      });
+    }
+    
+    await SupportRequest.updateOne(
+      { _id: id },
+      { 
+        $set: { 
+          assignedTo: adminId,
+          updatedAt: new Date()
+        } 
+      }
+    );
+    
+    res.json({
+      success: true,
+      message: 'Request assigned successfully'
+    });
+    
+  } catch (error) {
+    console.error('Error assigning request:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Get support stats for admin dashboard
+app.get('/api/admin/support-stats', async (req, res) => {
+  try {
+    const total = await SupportRequest.countDocuments();
+    const newRequests = await SupportRequest.countDocuments({ status: 'new' });
+    const inProgress = await SupportRequest.countDocuments({ status: 'in_progress' });
+    const resolved = await SupportRequest.countDocuments({ status: 'resolved' });
+    const closed = await SupportRequest.countDocuments({ status: 'closed' });
+    
+    const priorityStats = {
+      low: await SupportRequest.countDocuments({ priority: 'low' }),
+      normal: await SupportRequest.countDocuments({ priority: 'normal' }),
+      high: await SupportRequest.countDocuments({ priority: 'high' }),
+      critical: await SupportRequest.countDocuments({ priority: 'critical' })
+    };
+    
+    const avgResponseTime = await calculateAverageResponseTime();
+    
+    res.json({
+      success: true,
+      stats: {
+        total,
+        new: newRequests,
+        inProgress,
+        resolved,
+        closed,
+        byPriority: priorityStats,
+        avgResponseTime
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching support stats:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Helper function to calculate average response time
+async function calculateAverageResponseTime() {
+  try {
+    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    
+    const replies = await SupportReply.find({
+      createdAt: { $gte: oneWeekAgo },
+      isInternal: false
+    }).populate('supportRequestId');
+    
+    let totalResponseTime = 0;
+    let count = 0;
+    
+    for (const reply of replies) {
+      const request = reply.supportRequestId;
+      if (request) {
+        const responseTime = reply.createdAt - request.createdAt;
+        totalResponseTime += responseTime;
+        count++;
+      }
+    }
+    
+    if (count === 0) return 0;
+    
+    const avgMs = totalResponseTime / count;
+    const avgHours = Math.round(avgMs / (1000 * 60 * 60) * 10) / 10;
+    return avgHours;
+    
+  } catch (error) {
+    console.error('Error calculating average response time:', error);
+    return 0;
+  }
+}
+
+// Send reply email to user
+async function sendSupportReplyEmail(email, name, ticketId, message) {
+  try {
+    let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    
+    sendSmtpEmail.sender = {
+      name: "Web Consultant Hub Support",
+      email: process.env.EMAIL_FROM || 'support@webconsultanthub.com'
+    };
+    
+    sendSmtpEmail.to = [{ 
+      email: email,
+      name: name
+    }];
+    
+    sendSmtpEmail.subject = `New Reply to Your Support Ticket #${ticketId}`;
+    
+    sendSmtpEmail.htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Support Reply</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background: #667eea; padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+          <h1 style="color: white; margin: 0; font-size: 28px;">Support Team Reply</h1>
+        </div>
+        
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #ddd; border-top: none;">
+          <h2 style="color: #444; margin-top: 0;">Hello ${name},</h2>
+          
+          <p>Our support team has replied to your ticket <strong>#${ticketId}</strong>:</p>
+          
+          <div style="margin: 20px 0; padding: 15px; background: white; border-left: 4px solid #667eea; border-radius: 0 5px 5px 0;">
+            <p style="margin: 0; white-space: pre-wrap;">${message}</p>
+          </div>
+          
+          <p>You can reply to this email to continue the conversation.</p>
+          
+          <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+          
+          <p style="color: #999; font-size: 12px; text-align: center;">
+            &copy; ${new Date().getFullYear()} Web Consultant Hub. All rights reserved.
+          </p>
+        </div>
+      </html>
+    `;
+    
+    const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    return { success: true, messageId: data.messageId };
+    
+  } catch (error) {
+    console.error('❌ Failed to send reply email:', error);
+    throw error;
+  }
+}
+
+/* =========================
+   23. User Support Endpoints
+========================= */
+
+// Get user's support requests
+app.get('/api/user/support-requests/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    
+    const requests = await SupportRequest.find({ email: email.toLowerCase() })
+      .sort({ createdAt: -1 });
+    
+    const requestsWithData = await Promise.all(requests.map(async (request) => {
+      const replyCount = await SupportReply.countDocuments({ 
+        supportRequestId: request._id,
+        isInternal: false 
+      });
+      
+      const lastReply = await SupportReply.findOne({ 
+        supportRequestId: request._id,
+        isInternal: false 
+      }).sort({ createdAt: -1 });
+      
+      return {
+        ...request.toObject(),
+        replyCount,
+        lastReplyAt: lastReply?.createdAt
+      };
+    }));
+    
+    res.json({
+      success: true,
+      count: requestsWithData.length,
+      requests: requestsWithData
+    });
+    
+  } catch (error) {
+    console.error('Error fetching user support requests:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Get single support request with replies (for user)
+app.get('/api/user/support-requests/:email/:ticketId', async (req, res) => {
+  try {
+    const { email, ticketId } = req.params;
+    
+    const request = await SupportRequest.findOne({ 
+      email: email.toLowerCase(),
+      ticketId 
+    });
+    
+    if (!request) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Support request not found' 
+      });
+    }
+    
+    const replies = await SupportReply.find({ 
+      supportRequestId: request._id,
+      isInternal: false 
+    })
+      .populate('userId', 'email role')
+      .sort({ createdAt: 1 });
+    
+    res.json({
+      success: true,
+      request,
+      replies
+    });
+    
+  } catch (error) {
+    console.error('Error fetching support request:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
+
+// Check ticket status (public endpoint, no auth required)
+app.get('/api/support/ticket/:ticketId', async (req, res) => {
+  try {
+    const { ticketId } = req.params;
+    const { email } = req.query;
+    
+    const query = { ticketId };
+    if (email) {
+      query.email = email.toLowerCase();
+    }
+    
+    const request = await SupportRequest.findOne(query);
+    
+    if (!request) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Ticket not found' 
+      });
+    }
+    
+    // Only return limited information
+    res.json({
+      success: true,
+      ticket: {
+        ticketId: request.ticketId,
+        status: request.status,
+        subject: request.subject,
+        createdAt: request.createdAt,
+        updatedAt: request.updatedAt,
+        resolvedAt: request.resolvedAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error checking ticket status:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Database error' 
+    });
+  }
+});
 /* =========================
    404 Handler
 ========================= */
@@ -3095,4 +4196,18 @@ server = app.listen(PORT, async () => {
   console.log('   💳 PAYMENT ENDPOINTS:');
   console.log('   POST   /api/stripe-webhook               - Stripe webhook handler');
   console.log('=====================================\n');
+console.log('   📞 SUPPORT ENDPOINTS:');
+console.log('   POST   /api/support/submit                    - Submit support request');
+console.log('   GET    /api/support/ticket/:ticketId          - Check ticket status (public)');
+console.log('   GET    /api/user/support-requests/:email      - Get user support requests');
+console.log('   GET    /api/user/support-requests/:email/:ticketId - Get specific request');
+console.log('');
+console.log('   👑 ADMIN SUPPORT ENDPOINTS:');
+console.log('   GET    /api/admin/support-requests            - Get all support requests');
+console.log('   GET    /api/admin/support-requests/:id        - Get request with replies');
+console.log('   POST   /api/admin/support-requests/:id/reply  - Add reply to request');
+console.log('   PUT    /api/admin/support-requests/:id/status - Update request status');
+console.log('   PUT    /api/admin/support-requests/:id/assign - Assign to admin');
+console.log('   GET    /api/admin/support-stats               - Get support statistics');
+
 });
