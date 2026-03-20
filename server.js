@@ -308,6 +308,76 @@ const supportReplySchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+// Update your availabilityBlockSchema (replace the existing one)
+const availabilityBlockSchema = new mongoose.Schema({
+  date: { type: String, required: true }, // Store as YYYY-MM-DD string
+  status: { type: String, enum: ['available', 'unavailable', 'busy'], required: true },
+  startTime: { type: String, default: '09:00' },
+  endTime: { type: String, default: '17:00' },
+  timezone: { type: String, default: 'UTC' },
+  notes: { type: String, default: '' }
+});
+
+// User Availability Schema (main collection for storing availability)
+const userAvailabilitySchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  userType: { type: String, enum: ['consultant', 'client', 'admin'], required: true },
+  availability: [availabilityBlockSchema],
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+/* =========================
+   Agenda Item Schema (New)
+========================= */
+
+// Agenda Item Schema (for tracking engagements, missions, interviews)
+const agendaItemSchema = new mongoose.Schema({
+  // Who this agenda belongs to
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  userType: { type: String, enum: ['consultant', 'client', 'admin'], required: true },
+  
+  // Related entities
+  matchId: { type: mongoose.Schema.Types.ObjectId, ref: 'MatchSuggestion', default: null },
+  requestId: { type: mongoose.Schema.Types.ObjectId, ref: 'ClientRequest', default: null },
+  consultantProfileId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConsultantProfile', default: null },
+  clientProfileId: { type: mongoose.Schema.Types.ObjectId, ref: 'ClientProfile', default: null },
+  
+  // Agenda details
+  title: { type: String, required: true },
+  description: { type: String, default: '' },
+  type: { type: String, enum: ['mission', 'interview', 'meeting', 'deadline', 'reminder'], required: true },
+  status: { type: String, enum: ['scheduled', 'in_progress', 'completed', 'cancelled', 'pending'], default: 'scheduled' },
+  
+  // Timing
+  startDate: { type: Date, required: true },
+  endDate: { type: Date, default: null },
+  startTime: { type: String, default: '' },
+  endTime: { type: String, default: '' },
+  duration: { type: Number, default: null }, // in hours
+  
+  // Location (for on-site or virtual meetings)
+  location: { type: String, default: '' },
+  meetingLink: { type: String, default: '' },
+  
+  // Additional data
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+  reminders: [{
+    type: { type: String, enum: ['email', 'push', 'sms'], default: 'email' },
+    sentAt: { type: Date, default: null },
+    scheduledFor: { type: Date }
+  }],
+  
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// Indexes for efficient queries
+agendaItemSchema.index({ userId: 1, startDate: 1 });
+agendaItemSchema.index({ userId: 1, status: 1 });
+agendaItemSchema.index({ matchId: 1 });
+agendaItemSchema.index({ startDate: 1, endDate: 1 });
+
 
 // Create Models
 const SupportRequest = mongoose.model('SupportRequest', supportRequestSchema);
@@ -319,7 +389,8 @@ const ClientProfile = mongoose.model('ClientProfile', clientProfileSchema);
 const ClientRequest = mongoose.model('ClientRequest', clientRequestSchema);
 const MatchSuggestion = mongoose.model('MatchSuggestion', matchSuggestionSchema);
 const EmailLog = mongoose.model('EmailLog', emailLogSchema);
-
+const UserAvailability = mongoose.model('UserAvailability', userAvailabilitySchema);
+const AgendaItem = mongoose.model('AgendaItem', agendaItemSchema);
 /* =========================
    Email Service with Brevo API
 ========================= */
@@ -2749,6 +2820,11 @@ app.put('/api/admin/update-match-status', async (req, res) => {
       }
     );
     
+    // If status is accepted, create agenda items
+    if (status === 'accepted') {
+      await createAgendaFromMatch(match_id);
+    }
+    
     res.json({ 
       success: true, 
       message: 'Status updated successfully' 
@@ -2806,13 +2882,11 @@ app.get('/api/admin/requests', async (req, res) => {
   }
 });
 
-
 app.get('/api/admin/consultants', async (req, res) => {
   try {
     const { status } = req.query;
     
     const query = {};
-    
     if (status) {
       query.subscriptionStatus = status;
     }
@@ -2822,9 +2896,42 @@ app.get('/api/admin/consultants', async (req, res) => {
       .populate('positions')
       .sort({ createdAt: -1 });
     
+    // Get availability for all consultants
+    const allAvailability = await UserAvailability.find({
+      userType: 'consultant',
+      userId: { $in: consultants.map(c => c.userId?._id).filter(id => id) }
+    });
+    
+    // Create availability map
+    const availabilityMap = {};
+    allAvailability.forEach(avail => {
+      availabilityMap[avail.userId.toString()] = avail.availability;
+    });
+    
     const consultantsWithCounts = await Promise.all(consultants.map(async (consultant) => {
       const matchCount = await MatchSuggestion.countDocuments({ consultantProfileId: consultant._id });
       const consultantObj = consultant.toObject();
+      
+      // Get next available date
+      let nextAvailable = null;
+      const consultantAvailability = availabilityMap[consultant.userId?._id?.toString()] || [];
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      // Sort dates and find the next available date
+      const availableDates = consultantAvailability
+        .filter(block => block.status === 'available')
+        .map(block => {
+          const [year, month, day] = block.date.split('-').map(Number);
+          return new Date(year, month - 1, day);
+        })
+        .filter(date => date >= today)
+        .sort((a, b) => a - b);
+      
+      if (availableDates.length > 0) {
+        nextAvailable = availableDates[0].toLocaleDateString();
+      }
+      
       return {
         ...consultantObj,
         email: consultant.userId?.email,
@@ -2833,7 +2940,9 @@ app.get('/api/admin/consultants', async (req, res) => {
         match_count: matchCount,
         cv_url: consultant.cvUrl,
         cv_file_name: consultant.cvFileName,
-        dob: consultant.dob ? consultant.dob.toISOString().split('T')[0] : null // ADD THIS LINE
+        dob: consultant.dob ? consultant.dob.toISOString().split('T')[0] : null,
+        next_available: nextAvailable,
+        availability_count: consultantAvailability.length
       };
     }));
     
@@ -2851,50 +2960,6 @@ app.get('/api/admin/consultants', async (req, res) => {
     });
   }
 });
-
-// app.get('/api/admin/consultants', async (req, res) => {
-//   try {
-//     const { status } = req.query;
-    
-//     const query = {};
-    
-//     if (status) {
-//       query.subscriptionStatus = status;
-//     }
-    
-//     const consultants = await ConsultantProfile.find(query)
-//       .populate('userId')
-//       .populate('positions')
-//       .sort({ createdAt: -1 });
-    
-//     const consultantsWithCounts = await Promise.all(consultants.map(async (consultant) => {
-//       const matchCount = await MatchSuggestion.countDocuments({ consultantProfileId: consultant._id });
-//       const consultantObj = consultant.toObject();
-//       return {
-//         ...consultantObj,
-//         email: consultant.userId?.email,
-//         user_created: consultant.userId?.createdAt,
-//         positions: consultant.positions?.map(p => p.name).join(', '),
-//         match_count: matchCount,
-//         cv_url: consultant.cvUrl,
-//         cv_file_name: consultant.cvFileName
-//       };
-//     }));
-    
-//     res.json({
-//       success: true,
-//       count: consultantsWithCounts.length,
-//       consultants: consultantsWithCounts
-//     });
-    
-//   } catch (error) {
-//     console.error('Error fetching consultants:', error);
-//     res.status(500).json({ 
-//       success: false, 
-//       error: 'Database error' 
-//     });
-//   }
-// });
 
 app.get('/api/admin/clients', async (req, res) => {
   try {
@@ -4075,6 +4140,1115 @@ app.get('/api/support/ticket/:ticketId', async (req, res) => {
     });
   }
 });
+
+/* =========================
+   24. Availability Calendar Endpoints (Fixed for Email Lookup)
+========================= */
+/* =========================
+   Get Availability (FIXED - Use local date strings for keys)
+========================= */
+/* =========================
+   Get Availability for Admin (Enhanced)
+========================= */
+app.get('/api/availability/:userType/:userId', async (req, res) => {
+  try {
+    const { userType, userId } = req.params;
+    const months = parseInt(req.query.months) || 6;
+    const showAgenda = req.query.showAgenda === 'true';
+
+    console.log(`📅 Fetching availability for ${userType}: ${userId}`);
+
+    // Calculate date range (next 6 months)
+    const today = new Date();
+    const startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const endDate = new Date(today.getFullYear(), today.getMonth() + months, today.getDate());
+
+    let availability = {};
+    let agenda = [];
+
+    // Find the user
+    let user = null;
+    
+    if (userId.includes('@')) {
+      const decodedEmail = decodeURIComponent(userId);
+      console.log('🔍 Looking up user by email:', decodedEmail);
+      user = await User.findOne({ email: decodedEmail });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      console.log('🔍 Looking up user by ID:', userId);
+      user = await User.findById(userId);
+    }
+    
+    if (!user && userId !== 'all') {
+      console.log('❌ User not found for:', userId);
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    if (userId === 'all' && userType === 'admin') {
+      // Admin view - get all consultants with their profiles
+      const consultants = await ConsultantProfile.find({})
+        .populate('userId')
+        .populate('positions');
+      
+      const consultantUserIds = consultants.map(c => c.userId?._id).filter(id => id);
+      
+      // Get all availability data
+      const allAvailability = await UserAvailability.find({
+        userType: 'consultant',
+        userId: { $in: consultantUserIds }
+      });
+      
+      // Create a map of availability by consultant
+      const consultantAvailabilityMap = {};
+      allAvailability.forEach(avail => {
+        consultantAvailabilityMap[avail.userId.toString()] = avail.availability;
+      });
+      
+      // Build availability for each consultant
+      consultants.forEach(consultant => {
+        const consultantId = consultant.userId?._id?.toString();
+        if (!consultantId) return;
+        
+        const consultantAvail = consultantAvailabilityMap[consultantId] || [];
+        
+        consultantAvail.forEach(block => {
+          // Parse the date string
+          const [year, month, day] = block.date.split('-').map(Number);
+          const blockDate = new Date(year, month - 1, day);
+          
+          if (blockDate >= startDate && blockDate <= endDate) {
+            if (!availability[block.date]) {
+              availability[block.date] = {
+                availableCount: 0,
+                totalCount: consultants.length,
+                consultants: []
+              };
+            }
+            
+            // Add consultant to this date's list
+            availability[block.date].consultants.push({
+              userId: consultant.userId._id,
+              name: consultant.fullName || consultant.userId?.email,
+              status: block.status,
+              timeRange: block.status === 'available' ? { start: block.startTime, end: block.endTime } : null
+            });
+            
+            // Count available consultants separately
+            if (block.status === 'available') {
+              availability[block.date].availableCount++;
+            }
+          }
+        });
+      });
+      
+      console.log(`📊 Admin aggregated availability for ${Object.keys(availability).length} dates`);
+      
+    } else if (user) {
+      console.log(`✅ Found user: ${user.email} (${user._id})`);
+      
+      const userAvailability = await UserAvailability.findOne({
+        userId: user._id,
+        userType: user.role
+      });
+      
+      if (userAvailability && userAvailability.availability) {
+        console.log(`📊 Found ${userAvailability.availability.length} availability blocks`);
+        
+        userAvailability.availability.forEach(block => {
+          // Parse the date string
+          const [year, month, day] = block.date.split('-').map(Number);
+          const blockDate = new Date(year, month - 1, day);
+          
+          if (blockDate >= startDate && blockDate <= endDate) {
+            availability[block.date] = {
+              status: block.status,
+              timeRange: block.status === 'available' ? { start: block.startTime, end: block.endTime } : null,
+              notes: block.notes
+            };
+            console.log(`  ✅ Added ${block.date}: ${block.status}`);
+          }
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      availability,
+      agenda,
+      dateRange: {
+        start: startDate.toISOString().split('T')[0],
+        end: endDate.toISOString().split('T')[0]
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch availability',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+// Save availability for user (FIXED)
+
+/* =========================
+   24. Save Availability (New Format Only)
+========================= */
+/* =========================
+   Save Availability (FIXED - Store all statuses)
+========================= */
+app.post('/api/availability/save', async (req, res) => {
+  try {
+    const { userId, userType, date, status, timeRange, notes } = req.body;
+
+    if (!userId || !userType || !date || !status) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: userId, userType, date, status'
+      });
+    }
+
+    console.log(`📅 Saving availability for ${userType} ${userId} on ${date}: ${status}`);
+
+    // Find user
+    let user = null;
+    
+    if (userId.includes('@')) {
+      user = await User.findOne({ email: userId });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    }
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+    
+    if (user.role !== userType) {
+      return res.status(400).json({
+        success: false,
+        error: `User role mismatch. Expected ${userType}, found ${user.role}`
+      });
+    }
+
+    // Find or create user availability document
+    let userAvailability = await UserAvailability.findOne({
+      userId: user._id,
+      userType: user.role
+    });
+    
+    if (!userAvailability) {
+      userAvailability = new UserAvailability({
+        userId: user._id,
+        userType: user.role,
+        availability: []
+      });
+    }
+
+    // Store date as string directly
+    const dateKey = date; // Already in YYYY-MM-DD format
+    
+    console.log(`📅 Storing date: ${date} -> ${dateKey}`);
+    
+    // Check if availability for this date already exists
+    const existingIndex = userAvailability.availability.findIndex(block => 
+      block.date === dateKey
+    );
+
+    // Create the availability block based on status
+    let availabilityBlock;
+    
+    if (status === 'available') {
+      availabilityBlock = {
+        date: dateKey,
+        status: 'available',
+        startTime: timeRange?.start || '09:00',
+        endTime: timeRange?.end || '17:00',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        notes: notes || ''
+      };
+    } else if (status === 'busy') {
+      availabilityBlock = {
+        date: dateKey,
+        status: 'busy',
+        startTime: '',
+        endTime: '',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        notes: notes || 'Currently on a project'
+      };
+    } else if (status === 'unavailable') {
+      availabilityBlock = {
+        date: dateKey,
+        status: 'unavailable',
+        startTime: '',
+        endTime: '',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        notes: notes || 'Not available'
+      };
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid status value'
+      });
+    }
+
+    // Add or update the availability block
+    if (existingIndex !== -1) {
+      userAvailability.availability[existingIndex] = availabilityBlock;
+      console.log(`✏️ Updated ${status} for ${dateKey}`);
+    } else {
+      userAvailability.availability.push(availabilityBlock);
+      console.log(`➕ Added ${status} for ${dateKey}`);
+    }
+
+    userAvailability.updatedAt = new Date();
+    await userAvailability.save();
+
+    console.log(`✅ Availability saved for ${dateKey}: ${status}`);
+
+    res.json({
+      success: true,
+      message: 'Availability saved successfully',
+      date: dateKey,
+      status,
+      timeRange: status === 'available' ? timeRange : null
+    });
+
+  } catch (error) {
+    console.error('❌ Error saving availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to save availability',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+/* =========================
+   25. Agenda Widget Endpoint (FIXED)
+========================= */
+/* =========================
+   Get Availability (FIXED - Use string dates)
+========================= */
+app.get('/api/availability/:userType/:userId', async (req, res) => {
+  try {
+    const { userType, userId } = req.params;
+    const months = parseInt(req.query.months) || 6;
+    const showAgenda = req.query.showAgenda === 'true';
+
+    console.log(`📅 Fetching availability for ${userType}: ${userId}`);
+
+    // Calculate date range (next 6 months)
+    const today = new Date();
+    const startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const endDate = new Date(today.getFullYear(), today.getMonth() + months, today.getDate());
+
+    let availability = {};
+    let agenda = [];
+
+    // Find the user
+    let user = null;
+    
+    if (userId.includes('@')) {
+      const decodedEmail = decodeURIComponent(userId);
+      console.log('🔍 Looking up user by email:', decodedEmail);
+      user = await User.findOne({ email: decodedEmail });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      console.log('🔍 Looking up user by ID:', userId);
+      user = await User.findById(userId);
+    }
+    
+    if (!user && userId !== 'all') {
+      console.log('❌ User not found for:', userId);
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    if (userId === 'all' && userType === 'admin') {
+      // Admin view - get all consultants
+      const consultants = await ConsultantProfile.find({ subscriptionStatus: 'active' });
+      const consultantUserIds = consultants.map(c => c.userId);
+      
+      const allAvailability = await UserAvailability.find({
+        userType: 'consultant',
+        userId: { $in: consultantUserIds }
+      });
+      
+      allAvailability.forEach(userAvail => {
+        userAvail.availability.forEach(block => {
+          // Parse the date string
+          const [year, month, day] = block.date.split('-').map(Number);
+          const blockDate = new Date(year, month - 1, day);
+          
+          if (blockDate >= startDate && blockDate <= endDate) {
+            if (!availability[block.date]) {
+              availability[block.date] = {
+                availableCount: 1,
+                totalCount: consultants.length,
+                consultants: [{
+                  userId: userAvail.userId,
+                  timeRange: { start: block.startTime, end: block.endTime }
+                }]
+              };
+            } else {
+              availability[block.date].availableCount++;
+              availability[block.date].consultants.push({
+                userId: userAvail.userId,
+                timeRange: { start: block.startTime, end: block.endTime }
+              });
+            }
+          }
+        });
+      });
+      
+    } else if (user) {
+      console.log(`✅ Found user: ${user.email} (${user._id})`);
+      
+      const userAvailability = await UserAvailability.findOne({
+        userId: user._id,
+        userType: user.role
+      });
+      
+      console.log(`📊 UserAvailability found:`, userAvailability ? 'Yes' : 'No');
+      
+      if (userAvailability && userAvailability.availability) {
+        console.log(`📊 Found ${userAvailability.availability.length} availability blocks`);
+        
+        userAvailability.availability.forEach(block => {
+          // Parse the date string
+          const [year, month, day] = block.date.split('-').map(Number);
+          const blockDate = new Date(year, month - 1, day);
+          
+          console.log(`  📅 Block date: ${block.date} -> ${blockDate.toDateString()}`);
+          console.log(`  📅 Start date: ${startDate.toDateString()}`);
+          console.log(`  📅 End date: ${endDate.toDateString()}`);
+          
+          if (blockDate >= startDate && blockDate <= endDate) {
+            availability[block.date] = {
+              status: block.status,
+              timeRange: { start: block.startTime, end: block.endTime },
+              notes: block.notes
+            };
+            console.log(`  ✅ Added ${block.date}: ${block.status}`);
+          } else {
+            console.log(`  ⏭️ Skipped date (out of range)`);
+          }
+        });
+        
+        console.log(`📊 Availability keys after processing:`, Object.keys(availability));
+      } else {
+        console.log('⚠️ No availability found in UserAvailability collection');
+      }
+
+      // Fetch agenda items if requested
+      if (showAgenda) {
+        const agendaItems = await AgendaItem.find({
+          userId: user._id,
+          startDate: { $gte: startDate, $lte: endDate },
+          status: { $in: ['scheduled', 'in_progress'] }
+        }).sort({ startDate: 1 });
+        
+        agenda = agendaItems.map(item => ({
+          id: item._id,
+          title: item.title,
+          type: item.type,
+          date: item.startDate.toISOString().split('T')[0],
+          time: item.startTime,
+          status: item.status,
+          meetingLink: item.meetingLink
+        }));
+      }
+    }
+
+    console.log(`📤 Returning availability for ${Object.keys(availability).length} dates:`, Object.keys(availability));
+    
+    res.json({
+      success: true,
+      availability,
+      agenda,
+      dateRange: {
+        start: startDate.toISOString().split('T')[0],
+        end: endDate.toISOString().split('T')[0]
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch availability',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+// Get agenda for dashboard widget
+app.get('/api/agenda/:userType/:userId', async (req, res) => {
+  try {
+    const { userType, userId } = req.params;
+
+    console.log(`📋 Fetching agenda for ${userType}: ${userId}`);
+
+    // Find user by email or ID
+    let user = null;
+    
+    if (userId.includes('@')) {
+      user = await User.findOne({ email: userId });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    }
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    const now = new Date();
+    const sixMonthsLater = new Date();
+    sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
+
+    // Get agenda items from database
+    const agendaItems = await AgendaItem.find({
+      userId: user._id,
+      startDate: { $gte: now, $lte: sixMonthsLater }
+    }).sort({ startDate: 1 });
+
+    let currentMissions = [];
+    let upcomingEngagements = [];
+    let pendingRequests = [];
+
+    // If no agenda items in the database, try to derive from matches and requests
+    if (agendaItems.length === 0 && user.role === 'consultant') {
+      // Get consultant profile
+      const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+      
+      if (consultantProfile) {
+        // Get active matches from match suggestions
+        const activeMatches = await MatchSuggestion.find({ 
+          consultantProfileId: consultantProfile._id,
+          adminReviewStatus: { $in: ['accepted', 'shortlisted', 'contacted'] }
+        }).populate({
+          path: 'requestId',
+          populate: { path: 'clientProfileId' }
+        });
+
+        currentMissions = activeMatches
+          .filter(match => match.adminReviewStatus === 'accepted')
+          .map(match => ({
+            id: match._id,
+            title: match.requestId?.title || 'Project',
+            client: match.requestId?.clientProfileId?.companyName,
+            startDate: match.requestId?.startDate,
+            endDate: match.requestId?.endDate,
+            status: match.adminReviewStatus,
+            type: 'mission'
+          }));
+
+        upcomingEngagements = activeMatches
+          .filter(match => match.adminReviewStatus === 'shortlisted' || match.adminReviewStatus === 'contacted')
+          .map(match => ({
+            id: match._id,
+            title: `Interview with ${match.requestId?.clientProfileId?.companyName}`,
+            client: match.requestId?.clientProfileId?.companyName,
+            date: match.createdAt,
+            time: 'To be scheduled',
+            type: 'interview',
+            status: match.adminReviewStatus
+          }));
+
+        // Get pending match requests
+        const pendingMatches = await MatchSuggestion.find({ 
+          consultantProfileId: consultantProfile._id,
+          adminReviewStatus: 'suggested'
+        }).populate({
+          path: 'requestId',
+          populate: { path: 'clientProfileId' }
+        });
+
+        pendingRequests = pendingMatches.map(match => ({
+          id: match._id,
+          title: match.requestId?.title || 'Project Opportunity',
+          sender: match.requestId?.clientProfileId?.companyName,
+          matchScore: match.matchScore,
+          message: `You have been matched with a ${match.requestId?.positionId?.name} opportunity`,
+          type: 'match'
+        }));
+      }
+    } else if (agendaItems.length === 0 && user.role === 'client') {
+      // Get client profile
+      const clientProfile = await ClientProfile.findOne({ userId: user._id });
+      
+      if (clientProfile) {
+        // Get client requests
+        const clientRequests = await ClientRequest.find({ 
+          clientProfileId: clientProfile._id 
+        });
+
+        // Get active matches
+        const activeMatches = await MatchSuggestion.find({ 
+          requestId: { $in: clientRequests.map(r => r._id) },
+          adminReviewStatus: { $in: ['accepted', 'shortlisted', 'contacted'] }
+        }).populate('consultantProfileId');
+
+        currentMissions = activeMatches
+          .filter(match => match.adminReviewStatus === 'accepted')
+          .map(match => ({
+            id: match._id,
+            title: match.consultantProfileId?.fullName || 'Consultant',
+            consultant: match.consultantProfileId?.fullName,
+            startDate: match.requestId?.startDate,
+            endDate: match.requestId?.endDate,
+            status: match.adminReviewStatus,
+            type: 'mission'
+          }));
+
+        upcomingEngagements = activeMatches
+          .filter(match => match.adminReviewStatus === 'shortlisted')
+          .map(match => ({
+            id: match._id,
+            title: `Interview with ${match.consultantProfileId?.fullName}`,
+            consultant: match.consultantProfileId?.fullName,
+            date: match.createdAt,
+            time: 'To be scheduled',
+            type: 'interview',
+            status: match.adminReviewStatus
+          }));
+
+        // Get pending requests status
+        const pendingClientRequests = clientRequests.filter(r => 
+          r.status === 'submitted' || r.status === 'under_review'
+        );
+
+        pendingRequests = pendingClientRequests.map(request => ({
+          id: request._id,
+          title: request.title,
+          sender: 'Admin Team',
+          status: request.status,
+          message: `Your request "${request.title}" is ${request.status.replace('_', ' ')}`,
+          type: 'request'
+        }));
+
+        // Get match suggestions
+        const matchSuggestions = await MatchSuggestion.find({ 
+          requestId: { $in: clientRequests.map(r => r._id) },
+          adminReviewStatus: 'suggested'
+        }).populate('consultantProfileId');
+
+        pendingRequests.push(...matchSuggestions.map(match => ({
+          id: match._id,
+          title: `${match.consultantProfileId?.fullName} - ${match.matchScore}% match`,
+          sender: 'System',
+          matchScore: match.matchScore,
+          message: `A consultant has been suggested for your request`,
+          type: 'match'
+        })));
+      }
+    } else {
+      // Use agenda items from database
+      currentMissions = agendaItems.filter(item => 
+        item.type === 'mission' && 
+        item.status === 'in_progress'
+      ).map(item => ({
+        id: item._id,
+        title: item.title,
+        description: item.description,
+        startDate: item.startDate,
+        endDate: item.endDate,
+        status: item.status,
+        metadata: item.metadata
+      }));
+
+      upcomingEngagements = agendaItems.filter(item => 
+        (item.type === 'interview' || item.type === 'meeting') && 
+        item.status === 'scheduled'
+      ).map(item => ({
+        id: item._id,
+        title: item.title,
+        type: item.type,
+        date: item.startDate,
+        time: item.startTime,
+        location: item.location,
+        meetingLink: item.meetingLink,
+        status: item.status
+      }));
+
+      pendingRequests = agendaItems.filter(item => 
+        item.type === 'deadline' && 
+        item.status === 'pending'
+      ).map(item => ({
+        id: item._id,
+        title: item.title,
+        description: item.description,
+        dueDate: item.startDate,
+        status: item.status
+      }));
+    }
+
+    res.json({
+      success: true,
+      agenda: {
+        currentMissions,
+        upcomingEngagements,
+        pendingRequests
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching agenda:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch agenda',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   26. Create Agenda Item Endpoint
+========================= */
+
+// Create a new agenda item (for interviews, meetings, etc.)
+app.post('/api/agenda/create', async (req, res) => {
+  try {
+    const { 
+      userId, 
+      userType, 
+      title, 
+      description, 
+      type, 
+      startDate, 
+      endDate, 
+      startTime, 
+      endTime,
+      location,
+      meetingLink,
+      matchId,
+      requestId,
+      consultantProfileId,
+      clientProfileId,
+      metadata 
+    } = req.body;
+
+    if (!userId || !userType || !title || !type || !startDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: userId, userType, title, type, startDate'
+      });
+    }
+
+    // Find user
+    const user = await User.findOne({ 
+      $or: [
+        { _id: userId },
+        { email: userId }
+      ]
+    });
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    // Create agenda item
+    const agendaItem = new AgendaItem({
+      userId: user._id,
+      userType: user.role,
+      title,
+      description: description || '',
+      type,
+      status: 'scheduled',
+      startDate: new Date(startDate),
+      endDate: endDate ? new Date(endDate) : null,
+      startTime: startTime || '',
+      endTime: endTime || '',
+      location: location || '',
+      meetingLink: meetingLink || '',
+      matchId: matchId || null,
+      requestId: requestId || null,
+      consultantProfileId: consultantProfileId || null,
+      clientProfileId: clientProfileId || null,
+      metadata: metadata || {},
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+
+    await agendaItem.save();
+
+    console.log(`✅ Agenda item created: ${title} for user ${user.email}`);
+
+    res.json({
+      success: true,
+      message: 'Agenda item created successfully',
+      agendaItem
+    });
+
+  } catch (error) {
+    console.error('❌ Error creating agenda item:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to create agenda item',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   27. Update Agenda Item Endpoint
+========================= */
+
+// Update agenda item status or details
+app.put('/api/agenda/:itemId', async (req, res) => {
+  try {
+    const { itemId } = req.params;
+    const { status, startDate, endDate, startTime, endTime, meetingLink, notes } = req.body;
+
+    const agendaItem = await AgendaItem.findById(itemId);
+    
+    if (!agendaItem) {
+      return res.status(404).json({
+        success: false,
+        error: 'Agenda item not found'
+      });
+    }
+
+    const updates = {};
+    if (status) updates.status = status;
+    if (startDate) updates.startDate = new Date(startDate);
+    if (endDate) updates.endDate = new Date(endDate);
+    if (startTime) updates.startTime = startTime;
+    if (endTime) updates.endTime = endTime;
+    if (meetingLink) updates.meetingLink = meetingLink;
+    if (notes) updates.description = notes;
+    
+    updates.updatedAt = new Date();
+
+    await AgendaItem.updateOne(
+      { _id: itemId },
+      { $set: updates }
+    );
+
+    console.log(`✅ Agenda item ${itemId} updated`);
+
+    res.json({
+      success: true,
+      message: 'Agenda item updated successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating agenda item:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to update agenda item',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   28. Delete Agenda Item Endpoint
+========================= */
+
+app.delete('/api/agenda/:itemId', async (req, res) => {
+  try {
+    const { itemId } = req.params;
+
+    const result = await AgendaItem.deleteOne({ _id: itemId });
+    
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Agenda item not found'
+      });
+    }
+
+    console.log(`✅ Agenda item ${itemId} deleted`);
+
+    res.json({
+      success: true,
+      message: 'Agenda item deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error deleting agenda item:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to delete agenda item',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   29. Auto-create Agenda Items from Matches
+========================= */
+
+// This function should be called when a match is accepted
+async function createAgendaFromMatch(matchId) {
+  try {
+    const match = await MatchSuggestion.findById(matchId)
+      .populate('requestId')
+      .populate('consultantProfileId')
+      .populate({
+        path: 'requestId',
+        populate: { path: 'clientProfileId' }
+      });
+    
+    if (!match) {
+      console.error(`Match ${matchId} not found`);
+      return;
+    }
+
+    // Create agenda item for consultant
+    const consultantUser = await User.findById(match.consultantProfileId.userId);
+    if (consultantUser) {
+      await AgendaItem.create({
+        userId: consultantUser._id,
+        userType: 'consultant',
+        title: `Project: ${match.requestId.title}`,
+        description: `You have been matched with ${match.requestId.clientProfileId.companyName} for ${match.requestId.title}`,
+        type: 'mission',
+        status: 'scheduled',
+        startDate: match.requestId.startDate || new Date(),
+        endDate: match.requestId.endDate || null,
+        matchId: match._id,
+        requestId: match.requestId._id,
+        consultantProfileId: match.consultantProfileId._id,
+        clientProfileId: match.requestId.clientProfileId._id,
+        metadata: {
+          matchScore: match.matchScore,
+          companyName: match.requestId.clientProfileId.companyName
+        }
+      });
+      console.log(`✅ Created agenda item for consultant ${consultantUser.email}`);
+    }
+
+    // Create agenda item for client
+    const clientUser = await User.findById(match.requestId.clientProfileId.userId);
+    if (clientUser) {
+      await AgendaItem.create({
+        userId: clientUser._id,
+        userType: 'client',
+        title: `Consultant: ${match.consultantProfileId.fullName}`,
+        description: `${match.consultantProfileId.fullName} has been matched for your request: ${match.requestId.title}`,
+        type: 'mission',
+        status: 'scheduled',
+        startDate: match.requestId.startDate || new Date(),
+        endDate: match.requestId.endDate || null,
+        matchId: match._id,
+        requestId: match.requestId._id,
+        consultantProfileId: match.consultantProfileId._id,
+        clientProfileId: match.requestId.clientProfileId._id,
+        metadata: {
+          matchScore: match.matchScore,
+          consultantName: match.consultantProfileId.fullName
+        }
+      });
+      console.log(`✅ Created agenda item for client ${clientUser.email}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Error creating agenda from match:', error);
+  }
+}
+
+
+/* =========================
+   MIGRATION: Move Legacy Availability to New Format (One-Time)
+========================= */
+app.post('/api/admin/migrate-to-new-availability', async (req, res) => {
+  try {
+    console.log('🔄 Starting one-time migration to new availability format...');
+    
+    // Find all consultants with availability data
+    const consultants = await ConsultantProfile.find({
+      availability: { $exists: true, $ne: [] }
+    }).populate('userId');
+    
+    let migrated = 0;
+    let totalBlocks = 0;
+    
+    for (const consultant of consultants) {
+      if (!consultant.userId) {
+        console.log(`⚠️ Skipping consultant ${consultant._id} - no user found`);
+        continue;
+      }
+      
+      if (!consultant.availability || consultant.availability.length === 0) {
+        continue;
+      }
+      
+      // Check if already have data in new format
+      let userAvailability = await UserAvailability.findOne({
+        userId: consultant.userId._id,
+        userType: 'consultant'
+      });
+      
+      if (!userAvailability) {
+        userAvailability = new UserAvailability({
+          userId: consultant.userId._id,
+          userType: 'consultant',
+          availability: []
+        });
+      }
+      
+      // Convert legacy availability blocks
+      let newBlocks = 0;
+      for (const legacyBlock of consultant.availability) {
+        if (legacyBlock.startDate) {
+          const dateKey = legacyBlock.startDate.toISOString().split('T')[0];
+          const existingIndex = userAvailability.availability.findIndex(block => 
+            block.date.toISOString().split('T')[0] === dateKey
+          );
+          
+          if (existingIndex === -1) {
+            userAvailability.availability.push({
+              date: legacyBlock.startDate,
+              status: 'available',
+              startTime: legacyBlock.startTime || '09:00',
+              endTime: legacyBlock.endTime || '17:00',
+              timezone: legacyBlock.timezone || 'UTC',
+              notes: 'Migrated from legacy data'
+            });
+            newBlocks++;
+            totalBlocks++;
+          }
+        }
+      }
+      
+      if (newBlocks > 0) {
+        userAvailability.updatedAt = new Date();
+        await userAvailability.save();
+        migrated++;
+        console.log(`✅ Migrated ${newBlocks} blocks for ${consultant.userId.email}`);
+      }
+    }
+    
+    console.log(`✅ Migration complete: ${migrated} consultants migrated, ${totalBlocks} total blocks migrated`);
+    
+    // Optional: Remove legacy availability data after migration
+    if (req.body.removeLegacy === true) {
+      await ConsultantProfile.updateMany(
+        { availability: { $exists: true } },
+        { $unset: { availability: "" } }
+      );
+      console.log('🗑️ Legacy availability data removed from ConsultantProfile');
+    }
+    
+    res.json({
+      success: true,
+      message: 'Migration completed successfully',
+      migrated,
+      totalBlocks,
+      legacyRemoved: req.body.removeLegacy || false
+    });
+    
+  } catch (error) {
+    console.error('❌ Migration error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+
+
+// Debug endpoint to check admin availability data
+app.get('/api/debug/admin-availability-data', async (req, res) => {
+  try {
+    const consultants = await ConsultantProfile.find({})
+      .populate('userId');
+    
+    const allAvailability = await UserAvailability.find({
+      userType: 'consultant'
+    });
+    
+    const result = [];
+    
+    for (const consultant of consultants) {
+      const availability = allAvailability.find(a => 
+        a.userId.toString() === consultant.userId?._id?.toString()
+      );
+      
+      result.push({
+        name: consultant.fullName,
+        email: consultant.userId?.email,
+        subscriptionStatus: consultant.subscriptionStatus,
+        availability: availability ? availability.availability : [],
+        availabilityCount: availability ? availability.availability.length : 0
+      });
+    }
+    
+    res.json({
+      success: true,
+      consultants: result
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Add this temporary debug endpoint
+app.get('/api/debug/user-availability/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    
+    // Find the user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.json({ success: false, error: 'User not found' });
+    }
+    
+    console.log('🔍 Found user:', { id: user._id, email: user.email, role: user.role });
+    
+    // Find availability in UserAvailability collection
+    const userAvailability = await UserAvailability.findOne({
+      userId: user._id,
+      userType: user.role
+    });
+    
+    console.log('📦 UserAvailability data:', userAvailability);
+    
+    // Also check legacy availability
+    const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+    console.log('👤 Consultant profile availability:', consultantProfile?.availability);
+    
+    res.json({
+      success: true,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role
+      },
+      userAvailability: userAvailability ? {
+        id: userAvailability._id,
+        userId: userAvailability.userId,
+        userType: userAvailability.userType,
+        availability: userAvailability.availability,
+        count: userAvailability.availability.length
+      } : null,
+      legacyAvailability: consultantProfile?.availability || []
+    });
+    
+  } catch (error) {
+    console.error('Debug error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Call this function when a match is accepted
+// You can add this to your match status update endpoint
+
 /* =========================
    404 Handler
 ========================= */
