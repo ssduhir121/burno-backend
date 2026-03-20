@@ -2538,13 +2538,13 @@ app.post('/api/save-client-profile', async (req, res) => {
 });
 
 /* =========================
-   14. Create Client Request
+   14. Create Client Request (FIXED)
 ========================= */
 app.post('/api/create-client-request', async (req, res) => {
   try {
     const { 
       email, 
-      position_id, 
+      position_id,  // This should be the position name string
       title, 
       description, 
       start_date, 
@@ -2565,7 +2565,9 @@ app.post('/api/create-client-request', async (req, res) => {
     }
 
     console.log('📝 Creating client request for:', email);
+    console.log('Position requested:', position_id);
 
+    // Find the user
     const user = await User.findOne({ email, role: 'client', isVerified: true });
     
     if (!user) {
@@ -2575,6 +2577,7 @@ app.post('/api/create-client-request', async (req, res) => {
       });
     }
 
+    // Find the client profile
     const clientProfile = await ClientProfile.findOne({ userId: user._id });
 
     if (!clientProfile) {
@@ -2584,9 +2587,25 @@ app.post('/api/create-client-request', async (req, res) => {
       });
     }
 
+    // CRITICAL FIX: Find the position by name and get its ObjectId
+    let position = await Position.findOne({ name: position_id });
+    
+    if (!position) {
+      // If position doesn't exist, create it
+      console.log('Position not found, creating new position:', position_id);
+      position = await Position.create({
+        name: position_id,
+        category: getPositionCategory(position_id),
+        isActive: true,
+        createdAt: new Date()
+      });
+      console.log('✅ New position created:', position.name);
+    }
+
+    // Now create the client request with the correct ObjectId
     const clientRequest = await ClientRequest.create({
       clientProfileId: clientProfile._id,
-      positionId: position_id,
+      positionId: position._id,  // Use the ObjectId, not the string
       title,
       description: description || null,
       startDate: start_date ? new Date(start_date) : null,
@@ -2603,7 +2622,10 @@ app.post('/api/create-client-request', async (req, res) => {
     });
 
     console.log('✅ Client request created with ID:', clientRequest._id);
+    console.log('   Position ID:', position._id);
+    console.log('   Position name:', position.name);
 
+    // Generate match suggestions asynchronously
     setTimeout(async () => {
       try {
         await generateMatchSuggestions(clientRequest._id);
@@ -2627,7 +2649,6 @@ app.post('/api/create-client-request', async (req, res) => {
     });
   }
 });
-
 /* =========================
    15. Generate Match Suggestions
 ========================= */
