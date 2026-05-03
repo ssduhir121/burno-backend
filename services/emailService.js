@@ -9,7 +9,7 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASSWORD,
   },
 });
-
+// 
 transporter.verify((error, success) => {
   if (error) {
     console.error('❌ Email configuration error:', error);
