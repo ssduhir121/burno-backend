@@ -186,33 +186,109 @@ const availabilitySchema = new mongoose.Schema({
   recurrencePattern: { type: String, default: '' }
 });
 
-// Consultant Profile Schema
 const consultantProfileSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  
+  // Basic Information
   fullName: { type: String, default: '' },
-  dob: { type: Date, default: null },
   phone: { type: String, default: '' },
+  dob: { type: Date, default: null },
+  ageRange: { type: String, default: '' }, // 18-24, 25-34, 35-44, 45-54, 55-64, 65+
+  
+  // Location
   baseCountry: { type: String, default: '' },
   baseCity: { type: String, default: '' },
   workModePreference: { type: String, enum: ['remote', 'on-site', 'hybrid'], default: 'remote' },
   travelWillingness: { type: Boolean, default: false },
   travelRadiusKm: { type: Number, default: null },
-  yearsExperience: { type: String, default: '' },
+  preferredWorkLocation: { type: String, default: '' },
+  
+  // Professional Information
+  yearsExperience: { type: String, default: '' }, // 0-2, 3-5, 6-10, 10+
+  positions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Position' }],
+  certificates: [certificateSchema],
+  
+  // CV/Resume
   cvUrl: { type: String, default: '' },
   cvFileName: { type: String, default: '' },
+  cvUpdatedAt: { type: Date, default: null },
+  
+  // Social Links
   linkedinUrl: { type: String, default: '' },
   githubUrl: { type: String, default: '' },
-  preferredWorkLocation: { type: String, default: '' },
-  subscriptionStatus: { type: String, enum: ['active', 'inactive', 'canceled', 'past_due'], default: 'inactive' },
+  
+  // Statistics
+  rating: { type: Number, default: 0, min: 0, max: 5 },
+  totalReviews: { type: Number, default: 0 },
+  completedProjects: { type: Number, default: 0 },
+  profileViews: { type: Number, default: 0 },
+  earningsYtd: { type: Number, default: 0 }, // Year-to-date earnings in EUR
+  
+  // Financial
+  hourlyRate: { type: Number, default: 0 }, // Hourly rate in EUR
+  
+  // Subscription
+  subscriptionStatus: { 
+    type: String, 
+    enum: ['active', 'inactive', 'canceled', 'past_due', 'trialing'], 
+    default: 'inactive' 
+  },
   stripeCustomerId: { type: String, default: '' },
   stripeSubscriptionId: { type: String, default: '' },
   subscriptionEndDate: { type: Date, default: null },
-  positions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Position' }],
-  certificates: [certificateSchema],
-  availability: [availabilitySchema], // Legacy - kept for compatibility
+  subscriptionStartDate: { type: Date, default: null },
+  
+  // Legacy compatibility
+  availability: [availabilitySchema], // Kept for backward compatibility
+  
+  // Timestamps
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
+}, {
+  timestamps: true // This automatically manages createdAt and updatedAt
 });
+
+// Add indexes for better query performance
+consultantProfileSchema.index({ subscriptionStatus: 1 });
+consultantProfileSchema.index({ 'positions': 1 });
+consultantProfileSchema.index({ baseCountry: 1 });
+consultantProfileSchema.index({ rating: -1 });
+
+// Virtual for formatted location
+consultantProfileSchema.virtual('location').get(function() {
+  if (this.baseCity && this.baseCountry) {
+    return `${this.baseCity}, ${this.baseCountry}`;
+  } else if (this.baseCountry) {
+    return this.baseCountry;
+  }
+  return 'Remote';
+});
+
+// Virtual for subscription active status
+consultantProfileSchema.virtual('subscriptionActive').get(function() {
+  return this.subscriptionStatus === 'active';
+});
+
+// Method to check if profile is complete
+consultantProfileSchema.methods.isProfileComplete = function() {
+  return !!(
+    this.fullName && 
+    this.fullName.trim() !== '' &&
+    this.baseCountry &&
+    this.positions && 
+    this.positions.length > 0
+  );
+};
+
+// Pre-save middleware to update timestamps
+consultantProfileSchema.pre('save', function(next) {
+  this.updatedAt = new Date();
+  next();
+});
+
+// Ensure virtuals are included in JSON output
+consultantProfileSchema.set('toJSON', { virtuals: true });
+consultantProfileSchema.set('toObject', { virtuals: true });
 
 // Client Profile Schema
 const clientProfileSchema = new mongoose.Schema({
@@ -308,10 +384,10 @@ const supportReplySchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// Availability Block Schema (new format)
+// Update the availabilityBlockSchema to match frontend
 const availabilityBlockSchema = new mongoose.Schema({
-  date: { type: String, required: true }, // Store as YYYY-MM-DD string
-  status: { type: String, enum: ['available', 'unavailable', 'busy'], required: true },
+  date: { type: String, required: true },
+  status: { type: String, enum: ['available', 'busy', 'limited', 'unavailable'], required: true },
   startTime: { type: String, default: '09:00' },
   endTime: { type: String, default: '17:00' },
   timezone: { type: String, default: 'UTC' },
@@ -1494,11 +1570,24 @@ app.get('/api/auth/check-email/:email', async (req, res) => {
 ========================= */
 
 /* =========================
-   5. Complete Consultant Profile (Progressive onboarding)
+   UPDATED CONSULTANT PROFILE ENDPOINTS
+========================= */
+
+/* =========================
+   5. Complete Consultant Profile (Updated with ageRange, positions array)
 ========================= */
 app.post('/api/consultant/complete-profile', async (req, res) => {
   try {
-    const { email, fullName, jobTitle, yearsOfExperience, workLocation, phone, baseCountry, baseCity } = req.body;
+    const { 
+      email, 
+      fullName, 
+      phone, 
+      ageRange,
+      baseCountry,
+      yearsExperience,
+      positions,
+      jobTitle 
+    } = req.body;
 
     if (!email) {
       return res.status(400).json({
@@ -1508,6 +1597,7 @@ app.post('/api/consultant/complete-profile', async (req, res) => {
     }
 
     console.log('📝 Completing consultant profile for:', email);
+    console.log('   Data:', { fullName, phone, ageRange, baseCountry, yearsExperience, positions });
 
     const user = await User.findOne({ email, role: 'consultant' });
 
@@ -1532,32 +1622,38 @@ app.post('/api/consultant/complete-profile', async (req, res) => {
     };
 
     if (fullName) updateData.fullName = fullName;
-    if (yearsOfExperience) updateData.yearsExperience = yearsOfExperience;
     if (phone) updateData.phone = phone;
     if (baseCountry) updateData.baseCountry = baseCountry;
-    if (baseCity) updateData.baseCity = baseCity;
-    if (workLocation) updateData.preferredWorkLocation = workLocation;
+    if (yearsExperience) updateData.yearsExperience = yearsExperience;
+    
+    // Store ageRange as custom field (add to schema if needed)
+    if (ageRange) updateData.ageRange = ageRange;
 
     await ConsultantProfile.updateOne(
       { _id: consultantProfile._id },
       { $set: updateData }
     );
 
-    if (jobTitle) {
-      let position = await Position.findOne({ name: jobTitle });
-      
-      if (!position) {
-        position = await Position.create({
-          name: jobTitle,
-          category: getPositionCategory(jobTitle),
-          isActive: true,
-          createdAt: new Date()
-        });
+    // Handle positions (areas of expertise)
+    if (positions && Array.isArray(positions) && positions.length > 0) {
+      const positionIds = [];
+      for (const positionName of positions) {
+        let position = await Position.findOne({ name: positionName });
+        
+        if (!position) {
+          position = await Position.create({
+            name: positionName,
+            category: getPositionCategory(positionName),
+            isActive: true,
+            createdAt: new Date()
+          });
+        }
+        positionIds.push(position._id);
       }
       
       await ConsultantProfile.updateOne(
         { _id: consultantProfile._id },
-        { $addToSet: { positions: position._id } }
+        { $addToSet: { positions: { $each: positionIds } } }
       );
     }
 
@@ -1584,7 +1680,7 @@ app.post('/api/consultant/complete-profile', async (req, res) => {
 });
 
 /* =========================
-   6. Upload CV
+   6. Upload CV (Updated with better error handling)
 ========================= */
 app.post('/api/consultant/upload-cv', async (req, res) => {
   try {
@@ -1597,7 +1693,7 @@ app.post('/api/consultant/upload-cv', async (req, res) => {
       });
     }
 
-    if (!req.files || !req.files.cvFile) {
+    if (!req.files || !req.files.cv) {
       return res.status(400).json({
         success: false,
         error: 'CV file is required'
@@ -1613,7 +1709,7 @@ app.post('/api/consultant/upload-cv', async (req, res) => {
       });
     }
 
-    const cvFile = req.files.cvFile;
+    const cvFile = req.files.cv;
     const allowedExtensions = ['.pdf', '.doc', '.docx'];
     const fileExtension = path.extname(cvFile.name).toLowerCase();
     
@@ -1658,6 +1754,7 @@ app.post('/api/consultant/upload-cv', async (req, res) => {
         $set: { 
           cvUrl: cvUrl,
           cvFileName: cvFile.name,
+          cvUpdatedAt: new Date(),
           updatedAt: new Date()
         } 
       }
@@ -1678,6 +1775,628 @@ app.post('/api/consultant/upload-cv', async (req, res) => {
       success: false,
       error: 'Failed to upload CV',
       details: error.message 
+    });
+  }
+});
+
+/* =========================
+   8. Create Subscription (Updated with proper response)
+========================= */
+app.post('/api/consultant/create-subscription', async (req, res) => {
+  try {
+    const { email, paymentMethodId } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required'
+      });
+    }
+
+    console.log('💳 Creating subscription for:', email);
+
+    const user = await User.findOne({ email, role: 'consultant' });
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'Consultant not found'
+      });
+    }
+
+    const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
+
+    if (!consultantProfile) {
+      return res.status(404).json({
+        success: false,
+        error: 'Consultant profile not found'
+      });
+    }
+
+    // For now, we'll use mock payment
+    // In production, integrate with Stripe here
+    
+    const subscriptionEndDate = new Date();
+    subscriptionEndDate.setFullYear(subscriptionEndDate.getFullYear() + 1);
+
+    await ConsultantProfile.updateOne(
+      { _id: consultantProfile._id },
+      {
+        $set: {
+          subscriptionStatus: 'active',
+          subscriptionEndDate: subscriptionEndDate,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    console.log('✅ Subscription activated for:', email);
+
+    res.json({
+      success: true,
+      message: 'Subscription activated successfully',
+      subscriptionStatus: 'active',
+      subscriptionEndDate: subscriptionEndDate.toISOString().split('T')[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error creating subscription:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to create subscription',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   9. Get Consultant Profile (Updated with all fields)
+========================= */
+app.get('/api/consultant/profile/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const decodedEmail = decodeURIComponent(email);
+
+    const user = await User.findOne({ email: decodedEmail, role: 'consultant' });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'Consultant not found'
+      });
+    }
+
+    const consultantProfile = await ConsultantProfile.findOne({ userId: user._id })
+      .populate('positions');
+
+    const userAvailability = await UserAvailability.findOne({
+      userId: user._id,
+      userType: 'consultant'
+    });
+
+    // Get subscription info
+    const subscriptionEndDate = consultantProfile?.subscriptionEndDate;
+    const subscriptionActive = consultantProfile?.subscriptionStatus === 'active';
+
+    // Get earnings (mock data - replace with actual from database)
+    const earningsYtd = consultantProfile?.earningsYtd || 0;
+    
+    // Get total reviews
+    const totalReviews = consultantProfile?.totalReviews || 0;
+    
+    // Get member since
+    const memberSince = user.createdAt ? user.createdAt.getFullYear() : 2024;
+
+    res.json({
+      success: true,
+      profile: {
+        ...consultantProfile.toObject(),
+        email: user.email,
+        subscriptionActive,
+        subscriptionEndDate,
+        earningsYtd,
+        totalReviews,
+        memberSince,
+        ageRange: consultantProfile?.ageRange || '',
+        cvFileName: consultantProfile?.cvFileName || '',
+        cvUpdatedAt: consultantProfile?.cvUpdatedAt,
+        nextBillingDate: subscriptionEndDate ? subscriptionEndDate.toISOString().split('T')[0] : null
+      },
+      availability: userAvailability?.availability || []
+    });
+
+  } catch (error) {
+    console.error('Error fetching consultant profile:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch profile',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   15. Get Dashboard Data (Updated with all profile fields)
+========================= */
+app.get('/api/dashboard/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const decodedEmail = decodeURIComponent(email);
+
+    const user = await User.findOne({ email: decodedEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    let dashboardData = {
+      user: {
+        email: user.email,
+        role: user.role,
+        isVerified: user.isVerified
+      }
+    };
+
+    if (user.role === 'consultant') {
+      const consultantProfile = await ConsultantProfile.findOne({ userId: user._id })
+        .populate('positions');
+      
+      const userAvailability = await UserAvailability.findOne({
+        userId: user._id,
+        userType: 'consultant'
+      });
+
+      const upcomingAgenda = await AgendaItem.find({
+        userId: user._id,
+        startDate: { $gte: new Date() },
+        status: { $in: ['scheduled', 'in_progress'] }
+      }).sort({ startDate: 1 }).limit(10);
+
+      const recentMatches = await MatchSuggestion.find({ 
+        consultantProfileId: consultantProfile?._id 
+      })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .populate({
+          path: 'requestId',
+          populate: { path: 'clientProfileId' }
+        });
+
+      // Calculate profile completion
+      const basicInfoComplete = !!(consultantProfile?.fullName && consultantProfile?.fullName.trim() !== '');
+      const availabilityComplete = userAvailability?.availability?.length > 0;
+      const paymentComplete = consultantProfile?.subscriptionStatus === 'active';
+
+      dashboardData.profile = {
+        ...consultantProfile?.toObject(),
+        fullName: consultantProfile?.fullName || '',
+        title: consultantProfile?.positions?.[0]?.name || 'Strategic Consultant',
+        baseCity: consultantProfile?.baseCity || '',
+        baseCountry: consultantProfile?.baseCountry || '',
+        rating: consultantProfile?.rating || 4.8,
+        completedProjects: consultantProfile?.completedProjects || 12,
+        hourlyRate: consultantProfile?.hourlyRate || 0,
+        positions: consultantProfile?.positions || [],
+        isVerified: user.isVerified,
+        phone: consultantProfile?.phone || '',
+        ageRange: consultantProfile?.ageRange || '',
+        yearsExperience: consultantProfile?.yearsExperience || '',
+        cvFileName: consultantProfile?.cvFileName || '',
+        cvUpdatedAt: consultantProfile?.cvUpdatedAt,
+        subscriptionActive: consultantProfile?.subscriptionStatus === 'active',
+        subscriptionEndDate: consultantProfile?.subscriptionEndDate,
+        earningsYtd: consultantProfile?.earningsYtd || 0,
+        totalReviews: consultantProfile?.totalReviews || 0,
+        memberSince: user.createdAt?.getFullYear() || 2024,
+        nextBillingDate: consultantProfile?.subscriptionEndDate?.toISOString().split('T')[0]
+      };
+      
+      dashboardData.availability = userAvailability?.availability || [];
+      dashboardData.upcomingAgenda = upcomingAgenda;
+      dashboardData.recentMatches = recentMatches;
+      dashboardData.stats = {
+        profileViews: consultantProfile?.profileViews || 0,
+        matchRequests: await MatchSuggestion.countDocuments({ consultantProfileId: consultantProfile?._id }),
+        interviews: await MatchSuggestion.countDocuments({ 
+          consultantProfileId: consultantProfile?._id,
+          adminReviewStatus: 'accepted'
+        }),
+        earnings: consultantProfile?.earningsYtd || 0
+      };
+      dashboardData.profileCompletion = {
+        basicInfo: basicInfoComplete,
+        availability: availabilityComplete,
+        payment: paymentComplete,
+        status: paymentComplete ? 'complete' : (basicInfoComplete ? 'partial' : 'incomplete')
+      };
+      
+    } else if (user.role === 'client') {
+      const clientProfile = await ClientProfile.findOne({ userId: user._id });
+
+      const requests = await ClientRequest.find({ clientProfileId: clientProfile?._id })
+        .populate('positionId')
+        .sort({ createdAt: -1 })
+        .limit(10);
+
+      const upcomingInterviews = await AgendaItem.find({
+        userId: user._id,
+        type: 'interview',
+        startDate: { $gte: new Date() },
+        status: 'scheduled'
+      }).sort({ startDate: 1 }).limit(10);
+
+      dashboardData.profile = clientProfile;
+      dashboardData.recentRequests = requests;
+      dashboardData.upcomingInterviews = upcomingInterviews;
+      dashboardData.stats = {
+        requestCount: await ClientRequest.countDocuments({ clientProfileId: clientProfile?._id }),
+        activeRequests: await ClientRequest.countDocuments({ 
+          clientProfileId: clientProfile?._id,
+          status: { $in: ['submitted', 'under_review', 'contacting'] }
+        }),
+        profileCompletion: {
+          basicInfo: !!(clientProfile?.companyName && clientProfile?.contactName),
+          availability: true,
+          payment: true,
+          status: (clientProfile?.companyName && clientProfile?.contactName) ? 'complete' : 'partial'
+        }
+      };
+    }
+
+    res.json({
+      success: true,
+      data: dashboardData
+    });
+
+  } catch (error) {
+    console.error('Error fetching dashboard data:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch dashboard data',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   AVAILABILITY ENDPOINTS (Updated for new format)
+========================= */
+
+/* =========================
+   20. Get Availability (Updated for new format)
+========================= */
+app.get('/api/availability/:userType/:userId', async (req, res) => {
+  try {
+    const { userType, userId } = req.params;
+    const months = parseInt(req.query.months) || 6;
+
+    console.log(`📅 Fetching availability for ${userType}: ${userId}`);
+
+    const today = new Date();
+    const startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const endDate = new Date(today.getFullYear(), today.getMonth() + months, today.getDate());
+
+    let availability = {};
+
+    let user = null;
+    
+    if (userId.includes('@')) {
+      const decodedEmail = decodeURIComponent(userId);
+      user = await User.findOne({ email: decodedEmail });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    }
+    
+    if (!user && userId !== 'all') {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    if (userId === 'all' && userType === 'admin') {
+      const consultants = await ConsultantProfile.find({ subscriptionStatus: 'active' });
+      const consultantUserIds = consultants.map(c => c.userId);
+      
+      const allAvailability = await UserAvailability.find({
+        userType: 'consultant',
+        userId: { $in: consultantUserIds }
+      });
+      
+      allAvailability.forEach(userAvail => {
+        userAvail.availability.forEach(block => {
+          const [year, month, day] = block.date.split('-').map(Number);
+          const blockDate = new Date(year, month - 1, day);
+          
+          if (blockDate >= startDate && blockDate <= endDate) {
+            if (!availability[block.date]) {
+              availability[block.date] = {
+                availableCount: 0,
+                totalCount: consultants.length,
+                consultants: []
+              };
+            }
+            if (block.status === 'available') {
+              availability[block.date].availableCount++;
+              availability[block.date].consultants.push({
+                userId: userAvail.userId,
+                timeRange: { start: block.startTime, end: block.endTime }
+              });
+            }
+          }
+        });
+      });
+      
+    } else if (user) {
+      const userAvailability = await UserAvailability.findOne({
+        userId: user._id,
+        userType: user.role
+      });
+      
+      if (userAvailability && userAvailability.availability) {
+        userAvailability.availability.forEach(block => {
+          const [year, month, day] = block.date.split('-').map(Number);
+          const blockDate = new Date(year, month - 1, day);
+          
+          if (blockDate >= startDate && blockDate <= endDate) {
+            availability[block.date] = {
+              status: block.status,
+              startTime: block.startTime,
+              endTime: block.endTime,
+              timezone: block.timezone,
+              notes: block.notes,
+              type: block.status === 'available' ? 'available' : (block.status === 'busy' ? 'busy' : 'limited')
+            };
+          }
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      availability,
+      dateRange: {
+        start: startDate.toISOString().split('T')[0],
+        end: endDate.toISOString().split('T')[0]
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch availability',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   21. Save Availability (Updated for new format with type)
+========================= */
+app.post('/api/availability/save', async (req, res) => {
+  try {
+    const { userId, userType, date, type, startTime, endTime, timezone, notes, recurring, recurringType } = req.body;
+
+    if (!userId || !userType || !date || !type) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: userId, userType, date, type'
+      });
+    }
+
+    console.log(`📅 Saving availability for ${userType} ${userId} on ${date}: ${type}`);
+
+    let user = null;
+    
+    if (userId.includes('@')) {
+      user = await User.findOne({ email: userId });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    }
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+    
+    if (user.role !== userType) {
+      return res.status(400).json({
+        success: false,
+        error: `User role mismatch. Expected ${userType}, found ${user.role}`
+      });
+    }
+
+    let userAvailability = await UserAvailability.findOne({
+      userId: user._id,
+      userType: user.role
+    });
+    
+    if (!userAvailability) {
+      userAvailability = new UserAvailability({
+        userId: user._id,
+        userType: user.role,
+        availability: []
+      });
+    }
+
+    const dateKey = date;
+    
+    const existingIndex = userAvailability.availability.findIndex(block => 
+      block.date === dateKey
+    );
+
+    let availabilityBlock;
+    
+    if (type === 'available') {
+      availabilityBlock = {
+        date: dateKey,
+        status: 'available',
+        startTime: startTime || '09:00',
+        endTime: endTime || '17:00',
+        timezone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        notes: notes || ''
+      };
+    } else if (type === 'busy') {
+      availabilityBlock = {
+        date: dateKey,
+        status: 'busy',
+        startTime: startTime || '',
+        endTime: endTime || '',
+        timezone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        notes: notes || 'Currently on a project'
+      };
+    } else if (type === 'limited') {
+      availabilityBlock = {
+        date: dateKey,
+        status: 'limited',
+        startTime: startTime || '09:00',
+        endTime: endTime || '17:00',
+        timezone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        notes: notes || 'Limited availability'
+      };
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid type value. Must be "available", "busy", or "limited"'
+      });
+    }
+
+    if (existingIndex !== -1) {
+      userAvailability.availability[existingIndex] = availabilityBlock;
+      console.log(`✏️ Updated ${type} for ${dateKey}`);
+    } else {
+      userAvailability.availability.push(availabilityBlock);
+      console.log(`➕ Added ${type} for ${dateKey}`);
+    }
+
+    userAvailability.updatedAt = new Date();
+    await userAvailability.save();
+
+    // Handle recurring availability
+    if (recurring && recurringType) {
+      const startDate = new Date(dateKey);
+      let nextDate = new Date(startDate);
+      let addedCount = 0;
+      
+      // Add up to 12 recurring dates
+      for (let i = 1; i <= 12 && addedCount < 12; i++) {
+        if (recurringType === 'weekly') {
+          nextDate.setDate(startDate.getDate() + (7 * i));
+        } else if (recurringType === 'biweekly') {
+          nextDate.setDate(startDate.getDate() + (14 * i));
+        } else if (recurringType === 'monthly') {
+          nextDate.setMonth(startDate.getMonth() + i);
+        }
+        
+        const nextDateKey = nextDate.toISOString().split('T')[0];
+        
+        // Check if this date already has availability
+        const nextExistingIndex = userAvailability.availability.findIndex(block => block.date === nextDateKey);
+        
+        const recurringBlock = { ...availabilityBlock, date: nextDateKey };
+        
+        if (nextExistingIndex !== -1) {
+          userAvailability.availability[nextExistingIndex] = recurringBlock;
+        } else {
+          userAvailability.availability.push(recurringBlock);
+          addedCount++;
+        }
+      }
+      
+      await userAvailability.save();
+      console.log(`✅ Added ${addedCount} recurring ${recurringType} blocks`);
+    }
+
+    console.log(`✅ Availability saved for ${dateKey}: ${type}`);
+
+    res.json({
+      success: true,
+      message: 'Availability saved successfully',
+      date: dateKey,
+      type,
+      startTime: type === 'available' ? startTime : null,
+      endTime: type === 'available' ? endTime : null
+    });
+
+  } catch (error) {
+    console.error('❌ Error saving availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to save availability',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   21a. Delete Availability
+========================= */
+app.delete('/api/availability/:userId/:date', async (req, res) => {
+  try {
+    const { userId, date } = req.params;
+    const decodedDate = decodeURIComponent(date);
+
+    let user = null;
+    
+    if (userId.includes('@')) {
+      user = await User.findOne({ email: userId });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    }
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    const userAvailability = await UserAvailability.findOne({
+      userId: user._id,
+      userType: user.role
+    });
+    
+    if (!userAvailability) {
+      return res.status(404).json({
+        success: false,
+        error: 'No availability found for this user'
+      });
+    }
+
+    const beforeCount = userAvailability.availability.length;
+    userAvailability.availability = userAvailability.availability.filter(block => block.date !== decodedDate);
+    const afterCount = userAvailability.availability.length;
+    
+    if (beforeCount === afterCount) {
+      return res.status(404).json({
+        success: false,
+        error: `No availability found for date ${decodedDate}`
+      });
+    }
+    
+    userAvailability.updatedAt = new Date();
+    await userAvailability.save();
+
+    console.log(`🗑️ Deleted availability for ${user.email} on ${decodedDate}`);
+
+    res.json({
+      success: true,
+      message: 'Availability deleted successfully',
+      date: decodedDate
+    });
+
+  } catch (error) {
+    console.error('❌ Error deleting availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to delete availability',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -1744,7 +2463,7 @@ app.post('/api/consultant/availability', async (req, res) => {
 ========================= */
 app.post('/api/consultant/create-subscription', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, paymentMethodId } = req.body;
 
     if (!email) {
       return res.status(400).json({
@@ -1758,7 +2477,7 @@ app.post('/api/consultant/create-subscription', async (req, res) => {
     const user = await User.findOne({ email, role: 'consultant' });
     
     if (!user) {
-      return res.status(400).json({
+      return res.status(404).json({
         success: false,
         error: 'Consultant not found'
       });
@@ -1767,12 +2486,15 @@ app.post('/api/consultant/create-subscription', async (req, res) => {
     const consultantProfile = await ConsultantProfile.findOne({ userId: user._id });
 
     if (!consultantProfile) {
-      return res.status(400).json({
+      return res.status(404).json({
         success: false,
         error: 'Consultant profile not found'
       });
     }
 
+    // For now, we'll use mock payment
+    // In production, integrate with Stripe here
+    
     const subscriptionEndDate = new Date();
     subscriptionEndDate.setFullYear(subscriptionEndDate.getFullYear() + 1);
 
@@ -1812,8 +2534,9 @@ app.post('/api/consultant/create-subscription', async (req, res) => {
 app.get('/api/consultant/profile/:email', async (req, res) => {
   try {
     const { email } = req.params;
+    const decodedEmail = decodeURIComponent(email);
 
-    const user = await User.findOne({ email, role: 'consultant' });
+    const user = await User.findOne({ email: decodedEmail, role: 'consultant' });
 
     if (!user) {
       return res.status(404).json({
@@ -1830,9 +2553,34 @@ app.get('/api/consultant/profile/:email', async (req, res) => {
       userType: 'consultant'
     });
 
+    // Get subscription info
+    const subscriptionEndDate = consultantProfile?.subscriptionEndDate;
+    const subscriptionActive = consultantProfile?.subscriptionStatus === 'active';
+
+    // Get earnings (mock data - replace with actual from database)
+    const earningsYtd = consultantProfile?.earningsYtd || 0;
+    
+    // Get total reviews
+    const totalReviews = consultantProfile?.totalReviews || 0;
+    
+    // Get member since
+    const memberSince = user.createdAt ? user.createdAt.getFullYear() : 2024;
+
     res.json({
       success: true,
-      profile: consultantProfile,
+      profile: {
+        ...consultantProfile.toObject(),
+        email: user.email,
+        subscriptionActive,
+        subscriptionEndDate,
+        earningsYtd,
+        totalReviews,
+        memberSince,
+        ageRange: consultantProfile?.ageRange || '',
+        cvFileName: consultantProfile?.cvFileName || '',
+        cvUpdatedAt: consultantProfile?.cvUpdatedAt,
+        nextBillingDate: subscriptionEndDate ? subscriptionEndDate.toISOString().split('T')[0] : null
+      },
       availability: userAvailability?.availability || []
     });
 
@@ -2150,8 +2898,9 @@ app.get('/api/client/requests/:email', async (req, res) => {
 app.get('/api/dashboard/:email', async (req, res) => {
   try {
     const { email } = req.params;
+    const decodedEmail = decodeURIComponent(email);
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: decodedEmail });
 
     if (!user) {
       return res.status(404).json({
@@ -2193,22 +2942,52 @@ app.get('/api/dashboard/:email', async (req, res) => {
           populate: { path: 'clientProfileId' }
         });
 
-      dashboardData.profile = consultantProfile;
+      // Calculate profile completion
+      const basicInfoComplete = !!(consultantProfile?.fullName && consultantProfile?.fullName.trim() !== '');
+      const availabilityComplete = userAvailability?.availability?.length > 0;
+      const paymentComplete = consultantProfile?.subscriptionStatus === 'active';
+
+      dashboardData.profile = {
+        ...consultantProfile?.toObject(),
+        fullName: consultantProfile?.fullName || '',
+        title: consultantProfile?.positions?.[0]?.name || 'Strategic Consultant',
+        baseCity: consultantProfile?.baseCity || '',
+        baseCountry: consultantProfile?.baseCountry || '',
+        rating: consultantProfile?.rating || 4.8,
+        completedProjects: consultantProfile?.completedProjects || 12,
+        hourlyRate: consultantProfile?.hourlyRate || 0,
+        positions: consultantProfile?.positions || [],
+        isVerified: user.isVerified,
+        phone: consultantProfile?.phone || '',
+        ageRange: consultantProfile?.ageRange || '',
+        yearsExperience: consultantProfile?.yearsExperience || '',
+        cvFileName: consultantProfile?.cvFileName || '',
+        cvUpdatedAt: consultantProfile?.cvUpdatedAt,
+        subscriptionActive: consultantProfile?.subscriptionStatus === 'active',
+        subscriptionEndDate: consultantProfile?.subscriptionEndDate,
+        earningsYtd: consultantProfile?.earningsYtd || 0,
+        totalReviews: consultantProfile?.totalReviews || 0,
+        memberSince: user.createdAt?.getFullYear() || 2024,
+        nextBillingDate: consultantProfile?.subscriptionEndDate?.toISOString().split('T')[0]
+      };
+      
       dashboardData.availability = userAvailability?.availability || [];
       dashboardData.upcomingAgenda = upcomingAgenda;
       dashboardData.recentMatches = recentMatches;
       dashboardData.stats = {
-        matchCount: await MatchSuggestion.countDocuments({ consultantProfileId: consultantProfile?._id }),
-        activeMatches: await MatchSuggestion.countDocuments({ 
+        profileViews: consultantProfile?.profileViews || 0,
+        matchRequests: await MatchSuggestion.countDocuments({ consultantProfileId: consultantProfile?._id }),
+        interviews: await MatchSuggestion.countDocuments({ 
           consultantProfileId: consultantProfile?._id,
-          adminReviewStatus: { $in: ['shortlisted', 'contacted', 'accepted'] }
+          adminReviewStatus: 'accepted'
         }),
-        subscriptionStatus: consultantProfile?.subscriptionStatus,
-        profileCompletion: {
-          basicInfo: !!(consultantProfile?.fullName),
-          availability: userAvailability?.availability?.length > 0,
-          payment: consultantProfile?.subscriptionStatus === 'active'
-        }
+        earnings: consultantProfile?.earningsYtd || 0
+      };
+      dashboardData.profileCompletion = {
+        basicInfo: basicInfoComplete,
+        availability: availabilityComplete,
+        payment: paymentComplete,
+        status: paymentComplete ? 'complete' : (basicInfoComplete ? 'partial' : 'incomplete')
       };
       
     } else if (user.role === 'client') {
@@ -2236,7 +3015,10 @@ app.get('/api/dashboard/:email', async (req, res) => {
           status: { $in: ['submitted', 'under_review', 'contacting'] }
         }),
         profileCompletion: {
-          basicInfo: !!(clientProfile?.companyName && clientProfile?.contactName)
+          basicInfo: !!(clientProfile?.companyName && clientProfile?.contactName),
+          availability: true,
+          payment: true,
+          status: (clientProfile?.companyName && clientProfile?.contactName) ? 'complete' : 'partial'
         }
       };
     }
@@ -2591,8 +3373,11 @@ app.get('/api/availability/:userType/:userId', async (req, res) => {
           if (blockDate >= startDate && blockDate <= endDate) {
             availability[block.date] = {
               status: block.status,
-              timeRange: block.status === 'available' ? { start: block.startTime, end: block.endTime } : null,
-              notes: block.notes
+              startTime: block.startTime,
+              endTime: block.endTime,
+              timezone: block.timezone,
+              notes: block.notes,
+              type: block.status === 'available' ? 'available' : (block.status === 'busy' ? 'busy' : 'limited')
             };
           }
         });
@@ -2617,22 +3402,21 @@ app.get('/api/availability/:userType/:userId', async (req, res) => {
     });
   }
 });
-
 /* =========================
    21. Save Availability
 ========================= */
 app.post('/api/availability/save', async (req, res) => {
   try {
-    const { userId, userType, date, status, timeRange, notes } = req.body;
+    const { userId, userType, date, type, startTime, endTime, timezone, notes, recurring, recurringType } = req.body;
 
-    if (!userId || !userType || !date || !status) {
+    if (!userId || !userType || !date || !type) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: userId, userType, date, status'
+        error: 'Missing required fields: userId, userType, date, type'
       });
     }
 
-    console.log(`📅 Saving availability for ${userType} ${userId} on ${date}: ${status}`);
+    console.log(`📅 Saving availability for ${userType} ${userId} on ${date}: ${type}`);
 
     let user = null;
     
@@ -2677,59 +3461,95 @@ app.post('/api/availability/save', async (req, res) => {
 
     let availabilityBlock;
     
-    if (status === 'available') {
+    if (type === 'available') {
       availabilityBlock = {
         date: dateKey,
         status: 'available',
-        startTime: timeRange?.start || '09:00',
-        endTime: timeRange?.end || '17:00',
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        startTime: startTime || '09:00',
+        endTime: endTime || '17:00',
+        timezone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
         notes: notes || ''
       };
-    } else if (status === 'busy') {
+    } else if (type === 'busy') {
       availabilityBlock = {
         date: dateKey,
         status: 'busy',
-        startTime: '',
-        endTime: '',
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        startTime: startTime || '',
+        endTime: endTime || '',
+        timezone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
         notes: notes || 'Currently on a project'
       };
-    } else if (status === 'unavailable') {
+    } else if (type === 'limited') {
       availabilityBlock = {
         date: dateKey,
-        status: 'unavailable',
-        startTime: '',
-        endTime: '',
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        notes: notes || 'Not available'
+        status: 'limited',
+        startTime: startTime || '09:00',
+        endTime: endTime || '17:00',
+        timezone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        notes: notes || 'Limited availability'
       };
     } else {
       return res.status(400).json({
         success: false,
-        error: 'Invalid status value'
+        error: 'Invalid type value. Must be "available", "busy", or "limited"'
       });
     }
 
     if (existingIndex !== -1) {
       userAvailability.availability[existingIndex] = availabilityBlock;
-      console.log(`✏️ Updated ${status} for ${dateKey}`);
+      console.log(`✏️ Updated ${type} for ${dateKey}`);
     } else {
       userAvailability.availability.push(availabilityBlock);
-      console.log(`➕ Added ${status} for ${dateKey}`);
+      console.log(`➕ Added ${type} for ${dateKey}`);
     }
 
     userAvailability.updatedAt = new Date();
     await userAvailability.save();
 
-    console.log(`✅ Availability saved for ${dateKey}: ${status}`);
+    // Handle recurring availability
+    if (recurring && recurringType) {
+      const startDate = new Date(dateKey);
+      let nextDate = new Date(startDate);
+      let addedCount = 0;
+      
+      // Add up to 12 recurring dates
+      for (let i = 1; i <= 12 && addedCount < 12; i++) {
+        if (recurringType === 'weekly') {
+          nextDate.setDate(startDate.getDate() + (7 * i));
+        } else if (recurringType === 'biweekly') {
+          nextDate.setDate(startDate.getDate() + (14 * i));
+        } else if (recurringType === 'monthly') {
+          nextDate.setMonth(startDate.getMonth() + i);
+        }
+        
+        const nextDateKey = nextDate.toISOString().split('T')[0];
+        
+        // Check if this date already has availability
+        const nextExistingIndex = userAvailability.availability.findIndex(block => block.date === nextDateKey);
+        
+        const recurringBlock = { ...availabilityBlock, date: nextDateKey };
+        
+        if (nextExistingIndex !== -1) {
+          userAvailability.availability[nextExistingIndex] = recurringBlock;
+        } else {
+          userAvailability.availability.push(recurringBlock);
+          addedCount++;
+        }
+      }
+      
+      await userAvailability.save();
+      console.log(`✅ Added ${addedCount} recurring ${recurringType} blocks`);
+    }
+
+    console.log(`✅ Availability saved for ${dateKey}: ${type}`);
 
     res.json({
       success: true,
       message: 'Availability saved successfully',
       date: dateKey,
-      status,
-      timeRange: status === 'available' ? timeRange : null
+      type,
+      startTime: type === 'available' ? startTime : null,
+      endTime: type === 'available' ? endTime : null
     });
 
   } catch (error) {
@@ -2737,6 +3557,73 @@ app.post('/api/availability/save', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       error: 'Failed to save availability',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/* =========================
+   21a. Delete Availability
+========================= */
+app.delete('/api/availability/:userId/:date', async (req, res) => {
+  try {
+    const { userId, date } = req.params;
+    const decodedDate = decodeURIComponent(date);
+
+    let user = null;
+    
+    if (userId.includes('@')) {
+      user = await User.findOne({ email: userId });
+    } else if (mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    }
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    const userAvailability = await UserAvailability.findOne({
+      userId: user._id,
+      userType: user.role
+    });
+    
+    if (!userAvailability) {
+      return res.status(404).json({
+        success: false,
+        error: 'No availability found for this user'
+      });
+    }
+
+    const beforeCount = userAvailability.availability.length;
+    userAvailability.availability = userAvailability.availability.filter(block => block.date !== decodedDate);
+    const afterCount = userAvailability.availability.length;
+    
+    if (beforeCount === afterCount) {
+      return res.status(404).json({
+        success: false,
+        error: `No availability found for date ${decodedDate}`
+      });
+    }
+    
+    userAvailability.updatedAt = new Date();
+    await userAvailability.save();
+
+    console.log(`🗑️ Deleted availability for ${user.email} on ${decodedDate}`);
+
+    res.json({
+      success: true,
+      message: 'Availability deleted successfully',
+      date: decodedDate
+    });
+
+  } catch (error) {
+    console.error('❌ Error deleting availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to delete availability',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -3806,6 +4693,544 @@ app.get('/api/debug/routes', (req, res) => {
     success: true,
     routes: routes.sort((a, b) => a.path.localeCompare(b.path))
   });
+});
+
+
+/* =========================
+   CLIENT ADDITIONAL ENDPOINTS (Add these before the 404 handler)
+========================= */
+
+/* =========================
+   Client - Get All Consultants (for Find Consultants tab)
+========================= */
+app.get('/api/client/consultants', async (req, res) => {
+  try {
+    const { search, expertise, location, page = 1, limit = 20 } = req.query;
+    
+    let query = { subscriptionStatus: 'active' };
+    
+    if (search) {
+      query.$or = [
+        { fullName: { $regex: search, $options: 'i' } },
+        { baseCountry: { $regex: search, $options: 'i' } },
+        { baseCity: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    if (expertise) {
+      const positions = await Position.find({ name: { $regex: expertise, $options: 'i' } });
+      const positionIds = positions.map(p => p._id);
+      if (positionIds.length > 0) {
+        query.positions = { $in: positionIds };
+      }
+    }
+    
+    if (location) {
+      query.$or = [
+        { baseCountry: { $regex: location, $options: 'i' } },
+        { baseCity: { $regex: location, $options: 'i' } }
+      ];
+    }
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const total = await ConsultantProfile.countDocuments(query);
+    
+    const consultants = await ConsultantProfile.find(query)
+      .populate('userId')
+      .populate('positions')
+      .sort({ rating: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+    
+    // Get availability counts for each consultant
+    const consultantsWithData = await Promise.all(consultants.map(async (consultant) => {
+      const userAvailability = await UserAvailability.findOne({
+        userId: consultant.userId,
+        userType: 'consultant'
+      });
+      
+      const availableDays = userAvailability?.availability?.filter(
+        block => block.status === 'available' && new Date(block.date) >= new Date()
+      ).length || 0;
+      
+      return {
+        _id: consultant._id,
+        name: consultant.fullName,
+        title: consultant.positions?.[0]?.name || 'Independent Consultant',
+        location: consultant.baseCity && consultant.baseCountry 
+          ? `${consultant.baseCity}, ${consultant.baseCountry}`
+          : consultant.baseCountry || 'Remote',
+        expertise: consultant.positions?.map(p => p.name).join(', ') || 'General',
+        rating: consultant.rating || 0,
+        reviewCount: consultant.totalReviews || 0,
+        hourlyRate: consultant.hourlyRate || 0,
+        experience: consultant.yearsExperience || 'Not specified',
+        availableDays,
+        avatar: consultant.cvUrl ? `/uploads/cv/${consultant.cvFileName}` : null,
+        isVerified: consultant.userId?.isVerified || false
+      };
+    }));
+    
+    res.json({
+      success: true,
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit),
+      totalPages: Math.ceil(total / parseInt(limit)),
+      consultants: consultantsWithData
+    });
+    
+  } catch (error) {
+    console.error('Error fetching consultants:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch consultants',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   Client - Get Single Consultant Details
+========================= */
+app.get('/api/client/consultant/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const consultant = await ConsultantProfile.findById(id)
+      .populate('userId')
+      .populate('positions')
+      .populate('certificates');
+    
+    if (!consultant) {
+      return res.status(404).json({
+        success: false,
+        error: 'Consultant not found'
+      });
+    }
+    
+    // Get availability
+    const userAvailability = await UserAvailability.findOne({
+      userId: consultant.userId,
+      userType: 'consultant'
+    });
+    
+    // Get completed projects count from matches
+    const completedProjects = await MatchSuggestion.countDocuments({
+      consultantProfileId: consultant._id,
+      adminReviewStatus: 'accepted'
+    });
+    
+    // Get upcoming availability
+    const upcomingAvailability = userAvailability?.availability?.filter(
+      block => block.status === 'available' && new Date(block.date) >= new Date()
+    ).slice(0, 10) || [];
+    
+    res.json({
+      success: true,
+      consultant: {
+        ...consultant.toObject(),
+        email: consultant.userId?.email,
+        isVerified: consultant.userId?.isVerified || false,
+        completedProjects,
+        availability: userAvailability?.availability || [],
+        upcomingAvailability
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching consultant details:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch consultant details',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   Client - Update Match Status (Shortlist/Contact/Reject)
+========================= */
+app.put('/api/client/update-match-status', async (req, res) => {
+  try {
+    const { matchId, status, email } = req.body;
+    
+    if (!matchId || !status || !email) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Match ID, status, and email are required' 
+      });
+    }
+    
+    const validStatuses = ['shortlisted', 'contacted', 'rejected'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid status. Must be shortlisted, contacted, or rejected' 
+      });
+    }
+    
+    const user = await User.findOne({ email, role: 'client' });
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Client not found' 
+      });
+    }
+    
+    const match = await MatchSuggestion.findById(matchId)
+      .populate('requestId')
+      .populate('consultantProfileId');
+    
+    if (!match) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Match not found' 
+      });
+    }
+    
+    // Verify this match belongs to the client
+    const clientProfile = await ClientProfile.findOne({ userId: user._id });
+    if (match.requestId.clientProfileId.toString() !== clientProfile._id.toString()) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Unauthorized - This match does not belong to your company' 
+      });
+    }
+    
+    await MatchSuggestion.updateOne(
+      { _id: matchId },
+      {
+        $set: {
+          adminReviewStatus: status,
+          updatedAt: new Date()
+        }
+      }
+    );
+    
+    // If shortlisted, create agenda items for both parties
+    if (status === 'shortlisted') {
+      const consultantUser = await User.findById(match.consultantProfileId.userId);
+      const interviewDate = new Date();
+      interviewDate.setDate(interviewDate.getDate() + 7); // Schedule interview 7 days from now
+      
+      // Create agenda for client
+      await AgendaItem.create({
+        userId: user._id,
+        userType: 'client',
+        title: `Interview with ${match.consultantProfileId.fullName}`,
+        description: `Interview for position: ${match.requestId.title}`,
+        type: 'interview',
+        status: 'scheduled',
+        startDate: interviewDate,
+        matchId: match._id,
+        requestId: match.requestId._id,
+        consultantProfileId: match.consultantProfileId._id,
+        clientProfileId: clientProfile._id,
+        metadata: {
+          matchScore: match.matchScore,
+          consultantName: match.consultantProfileId.fullName
+        }
+      });
+      
+      // Create agenda for consultant
+      if (consultantUser) {
+        await AgendaItem.create({
+          userId: consultantUser._id,
+          userType: 'consultant',
+          title: `Interview with ${clientProfile.companyName}`,
+          description: `Interview for position: ${match.requestId.title}`,
+          type: 'interview',
+          status: 'scheduled',
+          startDate: interviewDate,
+          matchId: match._id,
+          requestId: match.requestId._id,
+          consultantProfileId: match.consultantProfileId._id,
+          clientProfileId: clientProfile._id,
+          metadata: {
+            matchScore: match.matchScore,
+            companyName: clientProfile.companyName
+          }
+        });
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `Match ${status} successfully`,
+      status
+    });
+    
+  } catch (error) {
+    console.error('Error updating match status:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to update match status',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   Client - Get Request Details with Matches
+========================= */
+app.get('/api/client/request/:requestId', async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { email } = req.query;
+    
+    const request = await ClientRequest.findById(requestId)
+      .populate('positionId')
+      .populate('clientProfileId');
+    
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        error: 'Request not found'
+      });
+    }
+    
+    // Verify ownership if email provided
+    if (email) {
+      const user = await User.findOne({ email, role: 'client' });
+      if (user) {
+        const clientProfile = await ClientProfile.findOne({ userId: user._id });
+        if (request.clientProfileId._id.toString() !== clientProfile._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            error: 'Unauthorized'
+          });
+        }
+      }
+    }
+    
+    const matches = await MatchSuggestion.find({ requestId: request._id })
+      .populate({
+        path: 'consultantProfileId',
+        populate: { path: 'userId positions' }
+      })
+      .sort({ matchScore: -1 });
+    
+    const matchesWithDetails = matches.map(match => ({
+      _id: match._id,
+      consultantName: match.consultantProfileId?.fullName || 'Unknown Consultant',
+      consultantLocation: match.consultantProfileId?.baseCity && match.consultantProfileId?.baseCountry
+        ? `${match.consultantProfileId.baseCity}, ${match.consultantProfileId.baseCountry}`
+        : match.consultantProfileId?.baseCountry || 'Remote',
+      expertise: match.consultantProfileId?.positions?.map(p => p.name).join(', ') || 'General',
+      matchScore: match.matchScore,
+      status: match.adminReviewStatus,
+      hourlyRate: match.consultantProfileId?.hourlyRate || 0,
+      rating: match.consultantProfileId?.rating || 0,
+      cvUrl: match.consultantProfileId?.cvUrl,
+      cvFileName: match.consultantProfileId?.cvFileName,
+      email: match.consultantProfileId?.userId?.email
+    }));
+    
+    res.json({
+      success: true,
+      request: {
+        ...request.toObject(),
+        positionName: request.positionId?.name
+      },
+      matches: matchesWithDetails,
+      matchCount: matchesWithDetails.length
+    });
+    
+  } catch (error) {
+    console.error('Error fetching request details:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch request details',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   Client - Get Request Status Summary
+========================= */
+app.get('/api/client/requests-summary/:email', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const decodedEmail = decodeURIComponent(email);
+    
+    const user = await User.findOne({ email: decodedEmail, role: 'client' });
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Client not found' 
+      });
+    }
+    
+    const clientProfile = await ClientProfile.findOne({ userId: user._id });
+    if (!clientProfile) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Client profile not found' 
+      });
+    }
+    
+    const totalRequests = await ClientRequest.countDocuments({ clientProfileId: clientProfile._id });
+    const activeRequests = await ClientRequest.countDocuments({ 
+      clientProfileId: clientProfile._id,
+      status: { $in: ['submitted', 'under_review', 'contacting'] }
+    });
+    const closedRequests = await ClientRequest.countDocuments({ 
+      clientProfileId: clientProfile._id,
+      status: 'closed' 
+    });
+    
+    // Get total matches across all requests
+    const allRequests = await ClientRequest.find({ clientProfileId: clientProfile._id }, { _id: 1 });
+    const requestIds = allRequests.map(r => r._id);
+    const totalMatches = await MatchSuggestion.countDocuments({ requestId: { $in: requestIds } });
+    const shortlistedMatches = await MatchSuggestion.countDocuments({ 
+      requestId: { $in: requestIds },
+      adminReviewStatus: 'shortlisted'
+    });
+    const contactedMatches = await MatchSuggestion.countDocuments({ 
+      requestId: { $in: requestIds },
+      adminReviewStatus: 'contacted'
+    });
+    
+    res.json({
+      success: true,
+      summary: {
+        totalRequests,
+        activeRequests,
+        closedRequests,
+        totalMatches,
+        shortlistedMatches,
+        contactedMatches
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching requests summary:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch requests summary',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   Client - Send Message to Consultant (Simple messaging)
+========================= */
+app.post('/api/client/send-message', async (req, res) => {
+  try {
+    const { fromEmail, toConsultantId, subject, message } = req.body;
+    
+    if (!fromEmail || !toConsultantId || !subject || !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields'
+      });
+    }
+    
+    const client = await User.findOne({ email: fromEmail, role: 'client' });
+    if (!client) {
+      return res.status(404).json({
+        success: false,
+        error: 'Client not found'
+      });
+    }
+    
+    const consultant = await ConsultantProfile.findById(toConsultantId).populate('userId');
+    if (!consultant) {
+      return res.status(404).json({
+        success: false,
+        error: 'Consultant not found'
+      });
+    }
+    
+    const clientProfile = await ClientProfile.findOne({ userId: client._id });
+    
+    // Create a support ticket as a message (or create a separate messaging system)
+    const ticketId = `MSG-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 1000)}`;
+    
+    const supportRequest = await SupportRequest.create({
+      name: clientProfile?.companyName || client.email,
+      email: fromEmail,
+      role: 'client',
+      subject: `Regarding consultant: ${consultant.fullName} - ${subject}`,
+      message: message,
+      priority: 'normal',
+      status: 'new',
+      ticketId,
+      userId: client._id,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+    
+    console.log(`📧 Message from client ${fromEmail} to consultant ${consultant.fullName}`);
+    
+    res.json({
+      success: true,
+      message: 'Message sent successfully',
+      ticketId: supportRequest.ticketId
+    });
+    
+  } catch (error) {
+    console.error('Error sending message:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to send message',
+      details: error.message 
+    });
+  }
+});
+
+/* =========================
+   Client - Get Industry List
+========================= */
+app.get('/api/client/industries', async (req, res) => {
+  try {
+    const industries = [
+      'Technology', 'Finance', 'Healthcare', 'Manufacturing', 
+      'Retail', 'Consulting', 'Education', 'Real Estate', 
+      'Transportation', 'Energy', 'Media', 'Telecommunications',
+      'Agriculture', 'Hospitality', 'Nonprofit', 'Government',
+      'Other'
+    ];
+    
+    res.json({
+      success: true,
+      industries
+    });
+    
+  } catch (error) {
+    console.error('Error fetching industries:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch industries' 
+    });
+  }
+});
+
+/* =========================
+   Client - Get Company Sizes
+========================= */
+app.get('/api/client/company-sizes', async (req, res) => {
+  try {
+    const companySizes = [
+      '1-10', '11-50', '51-200', '201-500', '501-1000', '1000+'
+    ];
+    
+    res.json({
+      success: true,
+      companySizes
+    });
+    
+  } catch (error) {
+    console.error('Error fetching company sizes:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch company sizes' 
+    });
+  }
 });
 
 /* =========================
