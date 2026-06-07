@@ -453,32 +453,26 @@ const AgendaItem = mongoose.model('AgendaItem', agendaItemSchema);
 
 
 /* =========================
-   Email Service with Brevo SMTP
+   Email Service with Brevo API
 ========================= */
 
-const nodemailer = require('nodemailer');
+// Initialize Brevo API client
+let defaultClient = SibApiV3Sdk.ApiClient.instance;
+let apiKey = defaultClient.authentications['api-key'];
+apiKey.apiKey = process.env.BREVO_API_KEY;
 
-// Create SMTP transporter for Brevo
-const smtpTransporter = nodemailer.createTransport({
-  host: 'smtp-relay.brevo.com',
-  port: 587,
-  secure: false, // false for port 587, true for 465
-  auth: {
-    user: process.env.BREVO_SMTP_LOGIN, // Your Brevo email/login
-    pass: process.env.BREVO_SMTP_KEY    // Your Brevo SMTP key (not API key)
-  }
-});
+let apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
 
-// Verify SMTP connection on startup
+// Test Brevo connection
 async function testBrevoConnection() {
   try {
-    await smtpTransporter.verify();
-    console.log('✅ Brevo SMTP connection successful');
-    console.log(`   SMTP Host: smtp-relay.brevo.com:587`);
-    console.log(`   SMTP User: ${process.env.BREVO_SMTP_LOGIN}`);
+    const accountApi = new SibApiV3Sdk.AccountApi();
+    const account = await accountApi.getAccount();
+    console.log('✅ Brevo API connection successful');
+    console.log(`   Account email: ${account.email}`);
     return true;
   } catch (error) {
-    console.error('❌ Brevo SMTP connection failed:', error.message);
+    console.error('❌ Brevo API connection failed:', error.message);
     return false;
   }
 }
@@ -488,7 +482,21 @@ const emailService = {
     try {
       const roleText = userType === 'consultant' ? 'Consultant' : (userType === 'admin' ? 'Admin' : 'Client');
       
-      const htmlContent = `
+      let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+      
+      sendSmtpEmail.sender = {
+        name: "Web Consultant Hub",
+        email: process.env.EMAIL_FROM || 'noreply@webconsultanthub.com'
+      };
+      
+      sendSmtpEmail.to = [{ 
+        email: email,
+        name: roleText
+      }];
+      
+      sendSmtpEmail.subject = `Your Magic Link for Web Consultant Hub`;
+      
+      sendSmtpEmail.htmlContent = `
         <!DOCTYPE html>
         <html>
         <head>
@@ -527,7 +535,7 @@ const emailService = {
         </html>
       `;
       
-      const textContent = `
+      sendSmtpEmail.textContent = `
         Your Magic Link for Web Consultant Hub (${roleText})
         
         Click the link below to sign in:
@@ -538,25 +546,20 @@ const emailService = {
         If you didn't request this, please ignore this email.
       `;
       
-      const mailOptions = {
-        from: `"Web Consultant Hub" <${process.env.EMAIL_FROM || 'noreply@webconsultanthub.com'}>`,
-        to: email,
-        subject: `Your Magic Link for Web Consultant Hub`,
-        html: htmlContent,
-        text: textContent
-      };
+      const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
       
-      const info = await smtpTransporter.sendMail(mailOptions);
-      
-      console.log(`📧 Email sent via Brevo SMTP to ${email}:`, info.messageId);
+      console.log(`📧 Email sent via Brevo API to ${email}:`, data.messageId);
       
       return { 
         success: true, 
-        messageId: info.messageId 
+        messageId: data.messageId 
       };
       
     } catch (error) {
-      console.error('❌ Failed to send email via Brevo SMTP:', error);
+      console.error('❌ Failed to send email via Brevo API:', error);
+      if (error.response && error.response.text) {
+        console.error('   Error details:', error.response.text);
+      }
       throw error;
     }
   }
@@ -564,7 +567,21 @@ const emailService = {
 
 async function sendSupportConfirmationEmail(email, name, ticketId, subject) {
   try {
-    const htmlContent = `
+    let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    
+    sendSmtpEmail.sender = {
+      name: "Web Consultant Hub Support",
+      email: process.env.EMAIL_FROM || 'support@webconsultanthub.com'
+    };
+    
+    sendSmtpEmail.to = [{ 
+      email: email,
+      name: name
+    }];
+    
+    sendSmtpEmail.subject = `Support Request Received - Ticket #${ticketId}`;
+    
+    sendSmtpEmail.htmlContent = `
       <!DOCTYPE html>
       <html>
       <head>
@@ -603,15 +620,8 @@ async function sendSupportConfirmationEmail(email, name, ticketId, subject) {
       </html>
     `;
     
-    const mailOptions = {
-      from: `"Web Consultant Hub Support" <${process.env.EMAIL_FROM || 'support@webconsultanthub.com'}>`,
-      to: email,
-      subject: `Support Request Received - Ticket #${ticketId}`,
-      html: htmlContent
-    };
-    
-    const info = await smtpTransporter.sendMail(mailOptions);
-    return { success: true, messageId: info.messageId };
+    const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    return { success: true, messageId: data.messageId };
     
   } catch (error) {
     console.error('❌ Failed to send support confirmation email:', error);
@@ -619,7 +629,6 @@ async function sendSupportConfirmationEmail(email, name, ticketId, subject) {
   }
 }
 
-// Update the other email functions similarly...
 async function notifyAdminsOfNewSupportRequest(supportRequest) {
   try {
     const admins = await User.find({ role: 'admin' });
@@ -645,7 +654,21 @@ async function notifyAdminsOfNewSupportRequest(supportRequest) {
     
     for (const admin of admins) {
       try {
-        const htmlContent = `
+        let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+        
+        sendSmtpEmail.sender = {
+          name: "Web Consultant Hub Support",
+          email: process.env.EMAIL_FROM || 'support@webconsultanthub.com'
+        };
+        
+        sendSmtpEmail.to = [{ 
+          email: admin.email,
+          name: 'Admin'
+        }];
+        
+        sendSmtpEmail.subject = `[${priorityLabels[supportRequest.priority]}] New Support Request - ${supportRequest.ticketId}`;
+        
+        sendSmtpEmail.htmlContent = `
           <!DOCTYPE html>
           <html>
           <head>
@@ -716,14 +739,7 @@ async function notifyAdminsOfNewSupportRequest(supportRequest) {
           </html>
         `;
         
-        const mailOptions = {
-          from: `"Web Consultant Hub Support" <${process.env.EMAIL_FROM || 'support@webconsultanthub.com'}>`,
-          to: admin.email,
-          subject: `[${priorityLabels[supportRequest.priority]}] New Support Request - ${supportRequest.ticketId}`,
-          html: htmlContent
-        };
-        
-        await smtpTransporter.sendMail(mailOptions);
+        await apiInstance.sendTransacEmail(sendSmtpEmail);
         console.log(`📧 Admin notification sent to ${admin.email}`);
       } catch (adminEmailError) {
         console.error(`❌ Failed to send notification to admin ${admin.email}:`, adminEmailError);
@@ -738,7 +754,21 @@ async function notifyAdminsOfNewSupportRequest(supportRequest) {
 
 async function sendSupportReplyEmail(email, name, ticketId, message) {
   try {
-    const htmlContent = `
+    let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    
+    sendSmtpEmail.sender = {
+      name: "Web Consultant Hub Support",
+      email: process.env.EMAIL_FROM || 'support@webconsultanthub.com'
+    };
+    
+    sendSmtpEmail.to = [{ 
+      email: email,
+      name: name
+    }];
+    
+    sendSmtpEmail.subject = `New Reply to Your Support Ticket #${ticketId}`;
+    
+    sendSmtpEmail.htmlContent = `
       <!DOCTYPE html>
       <html>
       <head>
@@ -771,15 +801,8 @@ async function sendSupportReplyEmail(email, name, ticketId, message) {
       </html>
     `;
     
-    const mailOptions = {
-      from: `"Web Consultant Hub Support" <${process.env.EMAIL_FROM || 'support@webconsultanthub.com'}>`,
-      to: email,
-      subject: `New Reply to Your Support Ticket #${ticketId}`,
-      html: htmlContent
-    };
-    
-    const info = await smtpTransporter.sendMail(mailOptions);
-    return { success: true, messageId: info.messageId };
+    const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    return { success: true, messageId: data.messageId };
     
   } catch (error) {
     console.error('❌ Failed to send reply email:', error);
